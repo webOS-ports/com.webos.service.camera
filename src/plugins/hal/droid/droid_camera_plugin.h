@@ -63,6 +63,7 @@ public:
 
 private:
     bool buildPipeline();
+    void logBusError(const char *context);
     void teardownPipeline();
 
     int cameraDevice_;

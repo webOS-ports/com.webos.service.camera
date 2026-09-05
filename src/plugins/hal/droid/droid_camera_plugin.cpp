@@ -191,14 +191,77 @@ bool DroidCameraPlugin::buildPipeline()
 
     appsink_ = gst_bin_get_by_name(GST_BIN(pipeline_), "sink");
 
-    if (gst_element_set_state(pipeline_, GST_STATE_PLAYING) ==
-        GST_STATE_CHANGE_FAILURE)
+    GstStateChangeReturn ret = gst_element_set_state(pipeline_, GST_STATE_PLAYING);
+
+    /* A failed state change on its own tells us nothing: the reason lives on
+     * the pipeline bus, and droidcamsrc puts a real message there (no such
+     * camera, HAL busy, droidmedia not reachable, ...). Without this the only
+     * evidence is "cannot start droid pipeline", which is not enough to act on. */
+    if (ret == GST_STATE_CHANGE_FAILURE)
     {
-        PLOGE("cannot start droid pipeline");
+        logBusError("set_state(PLAYING) failed");
         teardownPipeline();
         return false;
     }
+
+    /* PLAYING is reached asynchronously; a source that cannot open its device
+     * usually returns ASYNC here and only fails once it tries. Wait for the
+     * transition to settle so the failure is caught now rather than surfacing
+     * later as an empty appsink. */
+    if (ret == GST_STATE_CHANGE_ASYNC)
+    {
+        GstState state = GST_STATE_NULL;
+        /* Must fit inside the camera service's own budget: CameraHalProxy
+         * gives startPreview COMMAND_TIMEOUT_LONG (12 s), and the shared-memory
+         * setup and setBuffer have already spent part of it. Long enough to
+         * catch a source that cannot open its device - droidcamsrc prerolls in
+         * a couple of seconds when it works - while leaving the service room
+         * to answer its own caller. */
+        ret = gst_element_get_state(pipeline_, &state, nullptr, 5 * GST_SECOND);
+        if (ret != GST_STATE_CHANGE_SUCCESS || state != GST_STATE_PLAYING)
+        {
+            logBusError("pipeline did not reach PLAYING");
+            teardownPipeline();
+            return false;
+        }
+    }
     return true;
+}
+
+/* Drain whatever the pipeline bus is holding and log it. Called only on the
+ * failure paths, so the ordinary case stays quiet. */
+void DroidCameraPlugin::logBusError(const char *context)
+{
+    PLOGE("%s", context);
+
+    if (!pipeline_)
+        return;
+
+    GstBus *bus = gst_element_get_bus(pipeline_);
+    if (!bus)
+        return;
+
+    while (GstMessage *msg = gst_bus_pop_filtered(
+               bus, static_cast<GstMessageType>(GST_MESSAGE_ERROR | GST_MESSAGE_WARNING)))
+    {
+        GError *err = nullptr;
+        gchar *dbg  = nullptr;
+
+        if (GST_MESSAGE_TYPE(msg) == GST_MESSAGE_ERROR)
+            gst_message_parse_error(msg, &err, &dbg);
+        else
+            gst_message_parse_warning(msg, &err, &dbg);
+
+        PLOGE("  %s from %s: %s (%s)",
+              GST_MESSAGE_TYPE(msg) == GST_MESSAGE_ERROR ? "error" : "warning",
+              GST_OBJECT_NAME(GST_MESSAGE_SRC(msg)), err ? err->message : "?",
+              dbg ? dbg : "no detail");
+
+        g_clear_error(&err);
+        g_free(dbg);
+        gst_message_unref(msg);
+    }
+    gst_object_unref(bus);
 }
 
 void DroidCameraPlugin::teardownPipeline()
