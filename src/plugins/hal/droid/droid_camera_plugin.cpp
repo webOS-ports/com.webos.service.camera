@@ -20,7 +20,11 @@
 #include "camera_log.h"
 #include "plugin.hpp"
 
+#include <chrono>
 #include <cstring>
+#include <future>
+#include <memory>
+#include <thread>
 
 static void ensureGstInit()
 {
@@ -266,19 +270,49 @@ void DroidCameraPlugin::logBusError(const char *context)
 
 void DroidCameraPlugin::teardownPipeline()
 {
-    std::lock_guard<std::mutex> guard(lock_);
-    if (pipeline_)
+    GstElement *pipeline = nullptr;
+    GstElement *sink     = nullptr;
     {
-        gst_element_set_state(pipeline_, GST_STATE_NULL);
-        if (appsink_)
-        {
-            gst_object_unref(appsink_);
-            appsink_ = nullptr;
-        }
-        gst_object_unref(pipeline_);
-        pipeline_ = nullptr;
+        std::lock_guard<std::mutex> guard(lock_);
+        pipeline   = pipeline_;
+        sink       = appsink_;
+        pipeline_  = nullptr;
+        appsink_   = nullptr;
+        streaming_ = false;
     }
-    streaming_ = false;
+
+    if (sink)
+        gst_object_unref(sink);
+    if (!pipeline)
+        return;
+
+    /* The NULL transition is the dangerous one. When droidcamsrc is wedged
+     * part-way through bringing the vendor camera up, gst_element_set_state()
+     * does not come back, and because this runs in the short-lived
+     * com.webos.service.camera2.hal child that hangs the whole process. The
+     * Android camera client is then never released - logcat shows the
+     * "Camera N: Opened" with no matching disconnect - and every later attempt,
+     * including a plain gst-launch, fails until the device is rebooted.
+     *
+     * So bound it. If the pipeline will not stop, abandon it and let the
+     * process exit: exiting drops the binder connection, which is what actually
+     * makes CameraService release the camera. Leaking a pipeline in a process
+     * that is about to die costs nothing; hanging it costs a reboot. */
+    auto finished = std::make_shared<std::promise<void>>();
+    std::future<void> stopped = finished->get_future();
+
+    std::thread(
+        [pipeline, finished]()
+        {
+            gst_element_set_state(pipeline, GST_STATE_NULL);
+            gst_object_unref(pipeline);
+            finished->set_value();
+        })
+        .detach();
+
+    if (stopped.wait_for(std::chrono::seconds(3)) != std::future_status::ready)
+        PLOGE("droid pipeline did not reach NULL within 3s; abandoning it so the "
+              "process can exit and release the camera");
 }
 
 int DroidCameraPlugin::startCapture()
