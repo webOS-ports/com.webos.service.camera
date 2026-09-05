@@ -331,7 +331,19 @@ int DroidCameraPlugin::startCapture()
     constexpr int kAttempts = 3;
     for (int attempt = 1; attempt <= kAttempts; attempt++)
     {
-        if (buildPipeline())
+        /* Build on a thread of our own rather than on the luna-service2
+         * handler thread we were called from. Bringing droidcamsrc to PLAYING
+         * blocks, and doing that on the service's main loop stops it dispatching
+         * anything else - including whatever droidmedia may be waiting on. A
+         * plain gst-launch reaches PLAYING with the identical pipeline, and the
+         * calling context is the most visible thing that differs. */
+        bool built = false;
+        {
+            std::thread worker([this, &built]() { built = buildPipeline(); });
+            worker.join();
+        }
+
+        if (built)
         {
             if (attempt > 1)
                 PLOGI("droid pipeline started on attempt %d", attempt);
