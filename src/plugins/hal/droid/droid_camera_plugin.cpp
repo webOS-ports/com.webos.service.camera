@@ -318,10 +318,33 @@ void DroidCameraPlugin::teardownPipeline()
 int DroidCameraPlugin::startCapture()
 {
     ensureGstInit();
-    if (!buildPipeline())
-        return CAMERA_ERROR_UNKNOWN;
-    streaming_ = true;
-    return CAMERA_ERROR_NONE;
+
+    /* The vendor HAL frequently fails the first preview start with
+     * "error 0x1 from camera HAL", and droidcamsrc reports "error starting
+     * preview". That is not fatal: a plain gst-launch pipeline hits exactly the
+     * same error on this hardware and still reaches PLAYING, because it keeps
+     * going instead of tearing down. We were giving up on the first attempt.
+     *
+     * Retry the whole build a couple of times. Each failed attempt costs about
+     * a second, and the budget has to stay inside the camera service's
+     * COMMAND_TIMEOUT_LONG (12 s) for startPreview. */
+    constexpr int kAttempts = 3;
+    for (int attempt = 1; attempt <= kAttempts; attempt++)
+    {
+        if (buildPipeline())
+        {
+            if (attempt > 1)
+                PLOGI("droid pipeline started on attempt %d", attempt);
+            streaming_ = true;
+            return CAMERA_ERROR_NONE;
+        }
+
+        PLOGW("droid pipeline attempt %d/%d failed", attempt, kAttempts);
+        if (attempt < kAttempts)
+            g_usleep(300 * 1000);
+    }
+
+    return CAMERA_ERROR_UNKNOWN;
 }
 
 int DroidCameraPlugin::stopCapture()
