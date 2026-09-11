@@ -59,12 +59,33 @@ CameraHalService::CameraHalService(const char *service_name)
     g_main_loop_run(main_loop_ptr_.get());
 }
 
+bool CameraHalService::respondNotReady(LSMessage &message)
+{
+    jvalue_ref json_outobj = jobject_create();
+
+    jobject_put(json_outobj, J_CSTR_TO_JVAL(CONST_PARAM_NAME_RETURNVALUE), jboolean_create(false));
+    jobject_put(json_outobj, J_CSTR_TO_JVAL(CONST_PARAM_NAME_ERROR_CODE),
+                jnumber_create_i32(static_cast<int32_t>(DEVICE_ERROR_SERVICE_IS_NOT_READY)));
+
+    LS::Message request(&message);
+    request.respond(jvalue_stringify(json_outobj));
+    PLOGI("response message : %s", jvalue_stringify(json_outobj));
+
+    j_release(&json_outobj);
+
+    return true;
+}
+
 bool CameraHalService::createHal(LSMessage &message)
 {
     std::string device_type;
     jvalue_ref json_outobj = jobject_create();
 
     auto *payload = LSMessageGetPayload(&message);
+    if (!payload)
+    {
+        payload = "{}";
+    }
     PLOGI("payload %s", payload);
 
     pbnjson::JValue parsed = pbnjson::JDomParser::fromString(payload);
@@ -74,8 +95,16 @@ bool CameraHalService::createHal(LSMessage &message)
         device_type = parsed[CONST_PARAM_NAME_SUBSYSTEM].asString();
     }
 
-    pDeviceControl           = std::make_unique<DeviceControl>();
-    DEVICE_RETURN_CODE_T ret = pDeviceControl->createHal(std::move(device_type));
+    DEVICE_RETURN_CODE_T ret = DEVICE_ERROR_DEVICE_IS_ALREADY_OPENED;
+    if (pDeviceControl)
+    {
+        PLOGE("HAL is already created");
+    }
+    else
+    {
+        pDeviceControl = std::make_unique<DeviceControl>();
+        ret            = pDeviceControl->createHal(std::move(device_type));
+    }
 
     if (ret == DEVICE_OK)
     {
@@ -101,9 +130,19 @@ bool CameraHalService::createHal(LSMessage &message)
 
 bool CameraHalService::destroyHal(LSMessage &message)
 {
+    if (!pDeviceControl)
+    {
+        PLOGE("pDeviceControl is null");
+        return respondNotReady(message);
+    }
+
     jvalue_ref json_outobj = jobject_create();
 
     auto *payload = LSMessageGetPayload(&message);
+    if (!payload)
+    {
+        payload = "{}";
+    }
     PLOGI("payload %s", payload);
 
     DEVICE_RETURN_CODE_T ret = pDeviceControl->destroyHal();
@@ -133,12 +172,22 @@ bool CameraHalService::destroyHal(LSMessage &message)
 
 bool CameraHalService::open(LSMessage &message)
 {
+    if (!pDeviceControl)
+    {
+        PLOGE("pDeviceControl is null");
+        return respondNotReady(message);
+    }
+
     std::string devicenode;
     int ndev_id = 0;
     std::string payload_;
     jvalue_ref json_outobj = jobject_create();
 
     auto *payload = LSMessageGetPayload(&message);
+    if (!payload)
+    {
+        payload = "{}";
+    }
     PLOGI("payload %s", payload);
 
     pbnjson::JValue parsed = pbnjson::JDomParser::fromString(payload);
@@ -185,8 +234,18 @@ bool CameraHalService::open(LSMessage &message)
 
 bool CameraHalService::close(LSMessage &message)
 {
+    if (!pDeviceControl)
+    {
+        PLOGE("pDeviceControl is null");
+        return respondNotReady(message);
+    }
+
     jvalue_ref json_outobj = jobject_create();
-    auto *payload          = LSMessageGetPayload(&message);
+    auto *payload = LSMessageGetPayload(&message);
+    if (!payload)
+    {
+        payload = "{}";
+    }
     PLOGI("payload %s", payload);
 
     DEVICE_RETURN_CODE_T ret = pDeviceControl->close();
@@ -215,8 +274,18 @@ bool CameraHalService::close(LSMessage &message)
 
 bool CameraHalService::startPreview(LSMessage &message)
 {
+    if (!pDeviceControl)
+    {
+        PLOGE("pDeviceControl is null");
+        return respondNotReady(message);
+    }
+
     jvalue_ref json_outobj = jobject_create();
-    auto *payload          = LSMessageGetPayload(&message);
+    auto *payload = LSMessageGetPayload(&message);
+    if (!payload)
+    {
+        payload = "{}";
+    }
     PLOGI("payload %s", payload);
 
     pbnjson::JValue parsed = pbnjson::JDomParser::fromString(payload);
@@ -246,9 +315,19 @@ bool CameraHalService::startPreview(LSMessage &message)
 
 bool CameraHalService::stopPreview(LSMessage &message)
 {
+    if (!pDeviceControl)
+    {
+        PLOGE("pDeviceControl is null");
+        return respondNotReady(message);
+    }
+
     bool forceComplete     = false;
     jvalue_ref json_outobj = jobject_create();
-    auto *payload          = LSMessageGetPayload(&message);
+    auto *payload = LSMessageGetPayload(&message);
+    if (!payload)
+    {
+        payload = "{}";
+    }
     PLOGI("payload %s", payload);
 
     pbnjson::JValue parsed = pbnjson::JDomParser::fromString(payload);
@@ -283,6 +362,12 @@ bool CameraHalService::stopPreview(LSMessage &message)
 
 bool CameraHalService::startCapture(LSMessage &message)
 {
+    if (!pDeviceControl)
+    {
+        PLOGE("pDeviceControl is null");
+        return respondNotReady(message);
+    }
+
     CAMERA_FORMAT sformat;
     std::string imagepath;
     std::string mode       = cstr_oneshot;
@@ -290,6 +375,10 @@ bool CameraHalService::startCapture(LSMessage &message)
     jvalue_ref json_outobj = jobject_create();
 
     auto *payload = LSMessageGetPayload(&message);
+    if (!payload)
+    {
+        payload = "{}";
+    }
     PLOGI("payload %s", payload);
 
     pbnjson::JValue parsed = pbnjson::JDomParser::fromString(payload);
@@ -352,8 +441,18 @@ bool CameraHalService::startCapture(LSMessage &message)
 
 bool CameraHalService::stopCapture(LSMessage &message)
 {
+    if (!pDeviceControl)
+    {
+        PLOGE("pDeviceControl is null");
+        return respondNotReady(message);
+    }
+
     jvalue_ref json_outobj = jobject_create();
-    auto *payload          = LSMessageGetPayload(&message);
+    auto *payload = LSMessageGetPayload(&message);
+    if (!payload)
+    {
+        payload = "{}";
+    }
     PLOGI("payload %s", payload);
 
     DEVICE_RETURN_CODE_T ret = pDeviceControl->stopCapture();
@@ -375,16 +474,28 @@ bool CameraHalService::stopCapture(LSMessage &message)
     request.respond(jvalue_stringify(json_outobj));
     PLOGI("response message : %s", jvalue_stringify(json_outobj));
 
+    j_release(&json_outobj);
+
     return true;
 }
 
 bool CameraHalService::capture(LSMessage &message)
 {
+    if (!pDeviceControl)
+    {
+        PLOGE("pDeviceControl is null");
+        return respondNotReady(message);
+    }
+
     std::string imagepath;
     int ncount             = 1;
     jvalue_ref json_outobj = jobject_create();
 
     auto *payload = LSMessageGetPayload(&message);
+    if (!payload)
+    {
+        payload = "{}";
+    }
     PLOGI("payload %s", payload);
 
     pbnjson::JValue parsed = pbnjson::JDomParser::fromString(payload);
@@ -433,9 +544,19 @@ bool CameraHalService::capture(LSMessage &message)
 
 bool CameraHalService::getDeviceProperty(LSMessage &message)
 {
+    if (!pDeviceControl)
+    {
+        PLOGE("pDeviceControl is null");
+        return respondNotReady(message);
+    }
+
     CAMERA_PROPERTIES_T oparams;
     jvalue_ref json_outobj = jobject_create();
-    auto *payload          = LSMessageGetPayload(&message);
+    auto *payload = LSMessageGetPayload(&message);
+    if (!payload)
+    {
+        payload = "{}";
+    }
     PLOGI("payload %s", payload);
 
     DEVICE_RETURN_CODE_T ret = pDeviceControl->getDeviceProperty(&oparams);
@@ -484,9 +605,19 @@ bool CameraHalService::getDeviceProperty(LSMessage &message)
 
 bool CameraHalService::setDeviceProperty(LSMessage &message)
 {
+    if (!pDeviceControl)
+    {
+        PLOGE("pDeviceControl is null");
+        return respondNotReady(message);
+    }
+
     CAMERA_PROPERTIES_T inparams;
     jvalue_ref json_outobj = jobject_create();
-    auto *payload          = LSMessageGetPayload(&message);
+    auto *payload = LSMessageGetPayload(&message);
+    if (!payload)
+    {
+        payload = "{}";
+    }
     PLOGI("payload %s", payload);
 
     pbnjson::JValue parsed     = pbnjson::JDomParser::fromString(payload);
@@ -528,9 +659,19 @@ bool CameraHalService::setDeviceProperty(LSMessage &message)
 
 bool CameraHalService::setFormat(LSMessage &message)
 {
+    if (!pDeviceControl)
+    {
+        PLOGE("pDeviceControl is null");
+        return respondNotReady(message);
+    }
+
     CAMERA_FORMAT sformat;
     jvalue_ref json_outobj = jobject_create();
-    auto *payload          = LSMessageGetPayload(&message);
+    auto *payload = LSMessageGetPayload(&message);
+    if (!payload)
+    {
+        payload = "{}";
+    }
     PLOGI("payload %s", payload);
 
     pbnjson::JValue parsed = pbnjson::JDomParser::fromString(payload);
@@ -592,9 +733,19 @@ bool CameraHalService::setFormat(LSMessage &message)
 
 bool CameraHalService::getFormat(LSMessage &message)
 {
+    if (!pDeviceControl)
+    {
+        PLOGE("pDeviceControl is null");
+        return respondNotReady(message);
+    }
+
     CAMERA_FORMAT sformat;
     jvalue_ref json_outobj = jobject_create();
-    auto *payload          = LSMessageGetPayload(&message);
+    auto *payload = LSMessageGetPayload(&message);
+    if (!payload)
+    {
+        payload = "{}";
+    }
     PLOGI("payload %s", payload);
 
     DEVICE_RETURN_CODE_T ret = pDeviceControl->getFormat(&sformat);
@@ -634,10 +785,20 @@ bool CameraHalService::getFormat(LSMessage &message)
 
 bool CameraHalService::addClient(LSMessage &message)
 {
+    if (!pDeviceControl)
+    {
+        PLOGE("pDeviceControl is null");
+        return respondNotReady(message);
+    }
+
     int clientId           = -1;
     jvalue_ref json_outobj = jobject_create();
 
     auto *payload = LSMessageGetPayload(&message);
+    if (!payload)
+    {
+        payload = "{}";
+    }
     PLOGI("payload %s", payload);
 
     pbnjson::JValue parsed = pbnjson::JDomParser::fromString(payload);
@@ -673,10 +834,20 @@ bool CameraHalService::addClient(LSMessage &message)
 
 bool CameraHalService::removeClient(LSMessage &message)
 {
+    if (!pDeviceControl)
+    {
+        PLOGE("pDeviceControl is null");
+        return respondNotReady(message);
+    }
+
     int clientId           = -1;
     jvalue_ref json_outobj = jobject_create();
 
     auto *payload = LSMessageGetPayload(&message);
+    if (!payload)
+    {
+        payload = "{}";
+    }
     PLOGI("payload %s", payload);
 
     pbnjson::JValue parsed = pbnjson::JDomParser::fromString(payload);
@@ -712,12 +883,22 @@ bool CameraHalService::removeClient(LSMessage &message)
 
 bool CameraHalService::getFd(LSMessage &message)
 {
+    if (!pDeviceControl)
+    {
+        PLOGE("pDeviceControl is null");
+        return respondNotReady(message);
+    }
+
     int fd;
     int clientId = -1;
     std::string type;
     jvalue_ref json_outobj = jobject_create();
 
     auto *payload = LSMessageGetPayload(&message);
+    if (!payload)
+    {
+        payload = "{}";
+    }
     PLOGI("payload %s", payload);
 
     pbnjson::JValue parsed = pbnjson::JDomParser::fromString(payload);
@@ -779,6 +960,10 @@ bool CameraHalService::getDeviceInfo(LSMessage &message)
     jvalue_ref json_outobj = jobject_create();
 
     auto *payload = LSMessageGetPayload(&message);
+    if (!payload)
+    {
+        payload = "{}";
+    }
     PLOGI("payload %s", payload);
 
     pbnjson::JValue parsed = pbnjson::JDomParser::fromString(payload);
@@ -842,12 +1027,22 @@ bool CameraHalService::getDeviceInfo(LSMessage &message)
 
 bool CameraHalService::getSupportedCameraSolutionInfo(LSMessage &message)
 {
+    if (!pDeviceControl)
+    {
+        PLOGE("pDeviceControl is null");
+        return respondNotReady(message);
+    }
+
     std::vector<std::string> solutionsInfo;
 
     jvalue_ref json_outobj          = jobject_create();
     jvalue_ref json_solutions_array = jarray_create(0);
 
     auto *payload = LSMessageGetPayload(&message);
+    if (!payload)
+    {
+        payload = "{}";
+    }
     PLOGI("payload %s", payload);
 
     DEVICE_RETURN_CODE_T ret = pDeviceControl->getSupportedCameraSolutionInfo(solutionsInfo);
@@ -880,12 +1075,22 @@ bool CameraHalService::getSupportedCameraSolutionInfo(LSMessage &message)
 
 bool CameraHalService::getEnabledCameraSolutionInfo(LSMessage &message)
 {
+    if (!pDeviceControl)
+    {
+        PLOGE("pDeviceControl is null");
+        return respondNotReady(message);
+    }
+
     std::vector<std::string> solutionsInfo;
 
     jvalue_ref json_outobj          = jobject_create();
     jvalue_ref json_solutions_array = jarray_create(0);
 
     auto *payload = LSMessageGetPayload(&message);
+    if (!payload)
+    {
+        payload = "{}";
+    }
     PLOGI("payload %s", payload);
 
     DEVICE_RETURN_CODE_T ret = pDeviceControl->getEnabledCameraSolutionInfo(solutionsInfo);
@@ -919,11 +1124,21 @@ bool CameraHalService::getEnabledCameraSolutionInfo(LSMessage &message)
 
 bool CameraHalService::enableCameraSolution(LSMessage &message)
 {
+    if (!pDeviceControl)
+    {
+        PLOGE("pDeviceControl is null");
+        return respondNotReady(message);
+    }
+
     jvalue_ref json_outobj   = jobject_create();
     DEVICE_RETURN_CODE_T ret = DEVICE_OK;
     std::vector<std::string> solutionList;
 
     auto *payload = LSMessageGetPayload(&message);
+    if (!payload)
+    {
+        payload = "{}";
+    }
     PLOGI("payload %s", payload);
 
     pbnjson::JValue parsed = pbnjson::JDomParser::fromString(payload);
@@ -972,11 +1187,21 @@ bool CameraHalService::enableCameraSolution(LSMessage &message)
 
 bool CameraHalService::disableCameraSolution(LSMessage &message)
 {
+    if (!pDeviceControl)
+    {
+        PLOGE("pDeviceControl is null");
+        return respondNotReady(message);
+    }
+
     jvalue_ref json_outobj   = jobject_create();
     DEVICE_RETURN_CODE_T ret = DEVICE_OK;
     std::vector<std::string> solutionList;
 
     auto *payload = LSMessageGetPayload(&message);
+    if (!payload)
+    {
+        payload = "{}";
+    }
     PLOGI("payload %s", payload);
 
     pbnjson::JValue parsed = pbnjson::JDomParser::fromString(payload);
