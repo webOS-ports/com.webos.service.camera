@@ -89,16 +89,16 @@ void OpenMethod::getOpenObject(const char *input, const char *schemapath)
     {
         raw_buffer str_appid =
             jstring_get_fast(jobject_get(j_obj, J_CSTR_TO_BUF(CONST_PARAM_NAME_APPID)));
-        setAppId(str_appid.m_str);
+        setAppId(str_appid.m_str ? str_appid.m_str : "");
         raw_buffer str_id =
             jstring_get_fast(jobject_get(j_obj, J_CSTR_TO_BUF(CONST_PARAM_NAME_ID)));
-        setCameraId(str_id.m_str);
+        setCameraId(str_id.m_str ? str_id.m_str : cstr_invaliddeviceid.c_str());
         str_id = jstring_get_fast(jobject_get(j_obj, J_CSTR_TO_BUF(CONST_PARAM_NAME_APP_PRIORITY)));
-        std::string priority = str_id.m_str;
+        std::string priority = str_id.m_str ? str_id.m_str : "";
         // parsing of argumnets to open call. Only empty or primary or secondary are valid
         if ((0 == priority.length()) || (cstr_primary == priority) || (cstr_secondary == priority))
         {
-            setAppPriority(str_id.m_str);
+            setAppPriority(priority);
         }
         else
         {
@@ -308,7 +308,7 @@ void StartCaptureMethod::getStartCaptureObject(const char *input, const char *sc
 
         raw_buffer strformat =
             jstring_get_fast(jobject_get(jobj_params, J_CSTR_TO_BUF(CONST_PARAM_NAME_FORMAT)));
-        std::string format = strformat.m_str;
+        std::string format = strformat.m_str ? strformat.m_str : "";
 
         camera_format_t nformat;
         convertFormatToCode(std::move(format), &nformat);
@@ -454,7 +454,7 @@ void GetInfoMethod::getInfoObject(const char *input, const char *schemapath)
     if (0 == retval)
     {
         raw_buffer strid = jstring_get_fast(jobject_get(j_obj, J_CSTR_TO_BUF(CONST_PARAM_NAME_ID)));
-        setDeviceId(strid.m_str);
+        setDeviceId(strid.m_str ? strid.m_str : cstr_invaliddeviceid.c_str());
     }
     else
     {
@@ -549,7 +549,7 @@ void GetSetPropertiesMethod::getPropertiesObject(const char *input, const char *
         raw_buffer str_id = jstring_get_fast(j_name_id_obj);
 
         // set camera id
-        if (strstr(str_id.m_str, "camera") == NULL)
+        if (str_id.m_str == NULL || strstr(str_id.m_str, "camera") == NULL)
         {
             setCameraId(cstr_invaliddeviceid);
         }
@@ -560,10 +560,15 @@ void GetSetPropertiesMethod::getPropertiesObject(const char *input, const char *
 
         // set params
         jvalue_ref params = jobject_get(j_obj, J_CSTR_TO_BUF("params"));
-        for (ssize_t i = 0; i != jarray_size(params); i++)
+        if (jis_array(params))
         {
-            raw_buffer strid = jstring_get_fast(jarray_get(params, i));
-            setParams(strid.m_str);
+            ssize_t n = jarray_size(params);
+            for (ssize_t i = 0; i < n; i++)
+            {
+                raw_buffer strid = jstring_get_fast(jarray_get(params, i));
+                if (strid.m_str)
+                    setParams(strid.m_str);
+            }
         }
     }
     else
@@ -750,7 +755,7 @@ void SetFormatMethod::getSetFormatObject(const char *input, const char *schemapa
         jnumber_get_i32(jparams, &rcameraparams.nFps);
         raw_buffer strformat =
             jstring_get_fast(jobject_get(jobj_params, J_CSTR_TO_BUF(CONST_PARAM_NAME_FORMAT)));
-        std::string format = strformat.m_str;
+        std::string format = strformat.m_str ? strformat.m_str : "";
 
         camera_format_t eformat;
         convertFormatToCode(std::move(format), &eformat);
@@ -815,7 +820,7 @@ void GetFdMethod::getObject(const char *input, const char *schemapath)
 
         raw_buffer str_type =
             jstring_get_fast(jobject_get(j_obj, J_CSTR_TO_BUF(CONST_PARAM_NAME_TYPE)));
-        setType(str_type.m_str);
+        setType(str_type.m_str ? str_type.m_str : "");
     }
     else
     {
@@ -866,7 +871,7 @@ void GetSolutionsMethod::getObject(const char *input, const char *schemapath)
         setDeviceHandle(devicehandle);
         j_param_obj       = jobject_get(j_obj, J_CSTR_TO_BUF(CONST_PARAM_NAME_ID));
         raw_buffer str_id = jstring_get_fast(j_param_obj);
-        if (strstr(str_id.m_str, "camera") == NULL)
+        if (str_id.m_str == NULL || strstr(str_id.m_str, "camera") == NULL)
         {
             setCameraId(cstr_invaliddeviceid);
         }
@@ -980,7 +985,7 @@ void SetSolutionsMethod::getObject(const char *input, const char *schemapath)
 
         j_param_obj       = jobject_get(j_obj, J_CSTR_TO_BUF(CONST_PARAM_NAME_ID));
         raw_buffer str_id = jstring_get_fast(j_param_obj);
-        if (strstr(str_id.m_str, "camera") == NULL)
+        if (str_id.m_str == NULL || strstr(str_id.m_str, "camera") == NULL)
         {
             setCameraId(cstr_invaliddeviceid);
         }
@@ -991,28 +996,34 @@ void SetSolutionsMethod::getObject(const char *input, const char *schemapath)
 
         j_solutions_obj = jobject_get(j_obj, J_CSTR_TO_BUF(CONST_PARAM_NAME_SOLUTIONS));
 
-        for (ssize_t i = 0; i != jarray_size(j_solutions_obj); i++)
+        if (jis_array(j_solutions_obj))
         {
-            raw_buffer strid = jstring_get_fast(
-                jobject_get(jarray_get(j_solutions_obj, i), J_CSTR_TO_BUF("name")));
-
-            bool enable = false;
-            jvalue_ref j_param_obj =
-                jobject_get(jarray_get(j_solutions_obj, i), J_CSTR_TO_BUF("params"));
-            jboolean_get(jobject_get(j_param_obj, J_CSTR_TO_BUF("enable")), &enable);
-            /* To do: TBD */
-            /*
-            jboolean_get(jobject_get(j_param_obj, J_CSTR_TO_BUF("Key1")), &enable);
-            jboolean_get(jobject_get(j_param_obj, J_CSTR_TO_BUF("Key2")), &enable);
-            */
-
-            if (true == enable)
+            ssize_t n = jarray_size(j_solutions_obj);
+            for (ssize_t i = 0; i < n; i++)
             {
-                setEnableSolutionList(strid.m_str);
-            }
-            else
-            {
-                setDisbleSolutionList(strid.m_str);
+                raw_buffer strid = jstring_get_fast(
+                    jobject_get(jarray_get(j_solutions_obj, i), J_CSTR_TO_BUF("name")));
+                if (strid.m_str == NULL)
+                    continue;
+
+                bool enable = false;
+                jvalue_ref j_param_obj =
+                    jobject_get(jarray_get(j_solutions_obj, i), J_CSTR_TO_BUF("params"));
+                jboolean_get(jobject_get(j_param_obj, J_CSTR_TO_BUF("enable")), &enable);
+                /* To do: TBD */
+                /*
+                jboolean_get(jobject_get(j_param_obj, J_CSTR_TO_BUF("Key1")), &enable);
+                jboolean_get(jobject_get(j_param_obj, J_CSTR_TO_BUF("Key2")), &enable);
+                */
+
+                if (true == enable)
+                {
+                    setEnableSolutionList(strid.m_str);
+                }
+                else
+                {
+                    setDisbleSolutionList(strid.m_str);
+                }
             }
         }
     }
@@ -1061,7 +1072,7 @@ void GetFormatMethod::getObject(const char *input, const char *schemapath)
         j_param_obj       = jobject_get(j_obj, J_CSTR_TO_BUF(CONST_PARAM_NAME_ID));
         raw_buffer str_id = jstring_get_fast(j_param_obj);
 
-        if (strstr(str_id.m_str, "camera") == NULL)
+        if (str_id.m_str == NULL || strstr(str_id.m_str, "camera") == NULL)
         {
             setCameraId(cstr_invaliddeviceid);
         }
@@ -1130,8 +1141,8 @@ std::string GetFormatMethod::createObjectJsonString() const
 
 void EventNotificationMethod::getEventObject(const char *input, const char *schemapath)
 {
-    jvalue_ref j_obj = jobject_create();
-    int retval       = deSerialize(input, schemapath, j_obj);
+    jvalue_ref j_obj;
+    int retval = deSerialize(input, schemapath, j_obj);
 
     if (retval == 0)
     {
