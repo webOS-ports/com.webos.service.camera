@@ -21,9 +21,9 @@
 
 class Process
 {
-    pid_t _pid;
+    pid_t _pid{-1};
 
-    void start(const std::string &cmd);
+    bool start(const std::string &cmd);
     void stop();
 
 public:
