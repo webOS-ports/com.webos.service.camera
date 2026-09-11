@@ -46,6 +46,8 @@ V4l2CameraPlugin::V4l2CameraPlugin()
     : stream_format_(), buffers_(nullptr), n_buffers_(0), fd_(-1), dmafd_(),
       io_mode_(IOMODE_UNKNOWN), fourcc_format_(), camera_format_()
 {
+    for (int i = 0; i < CONST_MAX_BUFFER_NUM; ++i)
+        dmafd_[i] = -1;
     PLOGI("");
 }
 
@@ -54,6 +56,15 @@ V4l2CameraPlugin::~V4l2CameraPlugin() { PLOGI(""); }
 int V4l2CameraPlugin::openDevice(string devname, string payload)
 {
     PLOGI("devname : %s, payload :  %s", devname.c_str(), payload.c_str());
+    if (fd_ >= 0)
+    {
+        PLOGW("device already open, fd : %d, closing it first", fd_);
+        if (-1 == close(fd_))
+        {
+            PLOGE("cannot close fd: %d , %d, %s", fd_, errno, strerror(errno));
+        }
+        fd_ = -1;
+    }
     fd_ = open(devname.c_str(), O_RDWR | O_NONBLOCK);
     if (-1 == fd_)
     {
@@ -72,12 +83,20 @@ int V4l2CameraPlugin::closeDevice()
 {
     PLOGI("");
 
+    if (-1 == fd_)
+    {
+        PLOGI("device already closed");
+        return CAMERA_ERROR_NONE;
+    }
+
     if (-1 == close(fd_))
     {
         PLOGE("cannot close fd: %d , %d, %s", fd_, errno, strerror(errno));
+        fd_ = -1;
         return CAMERA_ERROR_UNKNOWN;
     }
 
+    fd_ = -1;
     return CAMERA_ERROR_NONE;
 }
 
@@ -153,8 +172,12 @@ int V4l2CameraPlugin::getFormat(void *stream_format)
         PLOGE("VIDIOC_G_PARM failed %d, %s", errno, strerror(errno));
         return CAMERA_ERROR_UNKNOWN;
     }
-    unsigned int stream_fps = streamparm.parm.capture.timeperframe.denominator /
-                              streamparm.parm.capture.timeperframe.numerator;
+    unsigned int stream_fps = 0;
+    if (streamparm.parm.capture.timeperframe.numerator > 0)
+    {
+        stream_fps = streamparm.parm.capture.timeperframe.denominator /
+                     streamparm.parm.capture.timeperframe.numerator;
+    }
     out_format->stream_fps = (stream_fps <= INT_MAX) ? stream_fps : 0;
 
     struct v4l2_format fmt;
@@ -177,8 +200,13 @@ int V4l2CameraPlugin::getFormat(void *stream_format)
 int V4l2CameraPlugin::setBuffer(int num_buffer, int io_mode, void **usrbufs)
 {
     PLOGI("num_buffer %d, io_mode %d", num_buffer, io_mode);
+    if (num_buffer <= 0 || num_buffer > CONST_MAX_BUFFER_NUM)
+    {
+        PLOGE("invalid num_buffer %d", num_buffer);
+        return CAMERA_ERROR_INVALID_PARAMETER;
+    }
     int retVal         = CAMERA_ERROR_NONE;
-    unsigned int count = (num_buffer >= 0) ? num_buffer : 0;
+    unsigned int count = (unsigned int)num_buffer;
     io_mode_           = io_mode;
     n_buffers_         = count;
 
@@ -238,15 +266,17 @@ int V4l2CameraPlugin::getBuffer(void *outbuf)
         buf.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         buf.memory = V4L2_MEMORY_MMAP;
 
-        retVal = xioctl(fd_, VIDIOC_DQBUF, &buf);
-        if (-1 == retVal)
+        if (-1 == xioctl(fd_, VIDIOC_DQBUF, &buf))
         {
             PLOGE("VIDIOC_DQBUF failed %d, %s", errno, strerror(errno));
+            return CAMERA_ERROR_UNKNOWN;
         }
-        if (buf.index < n_buffers_)
+        if (buf.index >= n_buffers_)
         {
-            out_buf->start = buffers_[buf.index].start;
+            PLOGE("invalid buffer index %u", buf.index);
+            return CAMERA_ERROR_UNKNOWN;
         }
+        out_buf->start  = buffers_[buf.index].start;
         out_buf->length = buf.bytesused;
         out_buf->index  = buf.index;
         break;
@@ -256,17 +286,19 @@ int V4l2CameraPlugin::getBuffer(void *outbuf)
         struct v4l2_buffer buf;
         CLEAR(buf);
         buf.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        buf.memory = V4L2_MEMORY_MMAP;
+        buf.memory = V4L2_MEMORY_USERPTR;
 
-        retVal = xioctl(fd_, VIDIOC_DQBUF, &buf);
-        if (-1 == retVal)
+        if (-1 == xioctl(fd_, VIDIOC_DQBUF, &buf))
         {
             PLOGE("VIDIOC_DQBUF failed %d, %s", errno, strerror(errno));
+            return CAMERA_ERROR_UNKNOWN;
         }
-        if (buf.index < n_buffers_)
+        if (buf.index >= n_buffers_)
         {
-            out_buf->start = buffers_[buf.index].start;
+            PLOGE("invalid buffer index %u", buf.index);
+            return CAMERA_ERROR_UNKNOWN;
         }
+        out_buf->start  = buffers_[buf.index].start;
         out_buf->length = buf.bytesused;
         out_buf->index  = buf.index;
         break;
@@ -278,10 +310,10 @@ int V4l2CameraPlugin::getBuffer(void *outbuf)
         buf.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         buf.memory = V4L2_MEMORY_DMABUF;
 
-        retVal = xioctl(fd_, VIDIOC_DQBUF, &buf);
-        if (-1 == retVal)
+        if (-1 == xioctl(fd_, VIDIOC_DQBUF, &buf))
         {
             PLOGE("VIDIOC_DQBUF failed %d, %s", errno, strerror(errno));
+            return CAMERA_ERROR_UNKNOWN;
         }
         out_buf->length = buf.length;
         out_buf->index  = buf.index;
@@ -289,10 +321,10 @@ int V4l2CameraPlugin::getBuffer(void *outbuf)
     }
     default:
     {
-        break;
+        return CAMERA_ERROR_UNKNOWN;
     }
     }
-    return retVal;
+    return CAMERA_ERROR_NONE;
 }
 
 int V4l2CameraPlugin::releaseBuffer(const void *inbuf)
@@ -473,6 +505,7 @@ int V4l2CameraPlugin::getProperties(void *cam_out_params)
 
     for (int i = 0; i < PROPERTY_END; i++)
     {
+        CLEAR(queryctrl);
         queryctrl.id = camera_param_map_[i];
         if (CAMERA_ERROR_NONE == getV4l2Property(queryctrl, out_params->stGetData.data[i]))
             ret = CAMERA_ERROR_NONE;
@@ -525,6 +558,12 @@ int V4l2CameraPlugin::getInfo(void *cam_info, std::string devicenode)
                 fival.height       = frmsize.discrete.height;
                 while ((-1 != xioctl(fd, VIDIOC_ENUM_FRAMEINTERVALS, &fival)))
                 {
+                    if (0 == fival.discrete.numerator)
+                    {
+                        PLOGI("WARN : Skipping frame interval with zero numerator!");
+                        fival.index++;
+                        continue;
+                    }
                     std::string res =
                         std::to_string(frmsize.discrete.width) + "," +
                         std::to_string(frmsize.discrete.height) + "," +
@@ -577,6 +616,7 @@ int V4l2CameraPlugin::setV4l2Property(std::map<int, int> &gIdWithPropertyValue)
     {
         if (CONST_PARAM_DEFAULT_VALUE != it.second)
         {
+            CLEAR(queryctrl);
             queryctrl.id = camera_param_map_[it.first];
             if (xioctl(fd_, VIDIOC_QUERYCTRL, &queryctrl) == -1)
             {
@@ -679,35 +719,52 @@ int V4l2CameraPlugin::requestMmapBuffers(unsigned int num_buffer)
         return CAMERA_ERROR_UNKNOWN;
     }
 
-    buffers_ = (buffer_t *)calloc(num_buffer, sizeof(*buffers_));
+    // n_buffers_ now holds the driver-adjusted buffer count
+    unsigned int count = n_buffers_;
+    buffers_           = (buffer_t *)calloc(count, sizeof(*buffers_));
     if (!buffers_)
     {
         PLOGE("Out of memory");
+        n_buffers_ = 0;
         return CAMERA_ERROR_UNKNOWN;
     }
 
-    for (n_buffers_ = 0; n_buffers_ < num_buffer; ++n_buffers_)
+    for (unsigned int i = 0; i < count; ++i)
     {
         struct v4l2_buffer buf;
         CLEAR(buf);
 
         buf.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         buf.memory = V4L2_MEMORY_MMAP;
-        buf.index  = n_buffers_;
+        buf.index  = i;
 
         if (-1 == xioctl(fd_, VIDIOC_QUERYBUF, &buf))
         {
             PLOGE("VIDIOC_QUERYBUF failed %d, %s", errno, strerror(errno));
+            for (unsigned int j = 0; j < i; ++j)
+            {
+                munmap(buffers_[j].start, buffers_[j].length);
+            }
+            free(buffers_);
+            buffers_   = nullptr;
+            n_buffers_ = 0;
             return CAMERA_ERROR_UNKNOWN;
         }
 
-        buffers_[n_buffers_].length = buf.length;
-        buffers_[n_buffers_].start =
+        buffers_[i].length = buf.length;
+        buffers_[i].start =
             mmap(NULL, buf.length, PROT_READ | PROT_WRITE, MAP_SHARED, fd_, buf.m.offset);
 
-        if (MAP_FAILED == buffers_[n_buffers_].start)
+        if (MAP_FAILED == buffers_[i].start)
         {
             PLOGE("mmap failed %d, %s", errno, strerror(errno));
+            for (unsigned int j = 0; j < i; ++j)
+            {
+                munmap(buffers_[j].start, buffers_[j].length);
+            }
+            free(buffers_);
+            buffers_   = nullptr;
+            n_buffers_ = 0;
             return CAMERA_ERROR_UNKNOWN;
         }
     }
@@ -724,10 +781,16 @@ int V4l2CameraPlugin::requestUserptrBuffers(unsigned int num_buffer, buffer_t **
         return CAMERA_ERROR_UNKNOWN;
     }
 
-    buffers_ = (buffer_t *)calloc(num_buffer, sizeof(*buffers_));
+    // the caller supplies exactly num_buffer buffers, so never track more
+    if (n_buffers_ > num_buffer)
+        n_buffers_ = num_buffer;
+    unsigned int count = n_buffers_;
+
+    buffers_ = (buffer_t *)calloc(count, sizeof(*buffers_));
     if (!buffers_)
     {
         PLOGE("out of memory");
+        n_buffers_ = 0;
         return CAMERA_ERROR_UNKNOWN;
     }
     int retVal = getFormat(&stream_format);
@@ -737,11 +800,11 @@ int V4l2CameraPlugin::requestUserptrBuffers(unsigned int num_buffer, buffer_t **
         return retVal;
     }
 
-    for (n_buffers_ = 0; n_buffers_ < num_buffer; ++n_buffers_)
+    for (unsigned int i = 0; i < count; ++i)
     {
         // assign buffers pushed by the user to user pointer buffers
-        buffers_[n_buffers_].length = (*usrbufs)[n_buffers_].length;
-        buffers_[n_buffers_].start  = (*usrbufs)[n_buffers_].start;
+        buffers_[i].length = (*usrbufs)[i].length;
+        buffers_[i].start  = (*usrbufs)[i].start;
     }
 
     return CAMERA_ERROR_NONE;
@@ -749,17 +812,20 @@ int V4l2CameraPlugin::requestUserptrBuffers(unsigned int num_buffer, buffer_t **
 
 int V4l2CameraPlugin::releaseMmapBuffers()
 {
-    for (unsigned int i = 0; i < n_buffers_; ++i)
+    if (buffers_)
     {
-        if (-1 == munmap(buffers_[i].start, buffers_[i].length))
+        for (unsigned int i = 0; i < n_buffers_; ++i)
         {
-            PLOGE("munmap failed %d, %s", errno, strerror(errno));
-            return CAMERA_ERROR_UNKNOWN;
+            if (buffers_[i].start && -1 == munmap(buffers_[i].start, buffers_[i].length))
+            {
+                PLOGE("munmap failed %d, %s", errno, strerror(errno));
+            }
+            buffers_[i].start = NULL;
         }
-        buffers_[i].start = NULL;
+        free(buffers_);
+        buffers_ = NULL;
     }
-    free(buffers_);
-    buffers_ = NULL;
+    n_buffers_ = 0;
 
     // request buffers to 0
     return requestBuffersToV4l2(0, V4L2_BUF_TYPE_VIDEO_CAPTURE, V4L2_MEMORY_MMAP);
@@ -779,10 +845,13 @@ int V4l2CameraPlugin::releaseUserptrBuffers()
 
 int V4l2CameraPlugin::releaseDmaBuffersFd()
 {
-    for (unsigned int i = 0; i < n_buffers_; ++i)
+    for (int i = 0; i < CONST_MAX_BUFFER_NUM; ++i)
     {
-        close(dmafd_[i]);
-        dmafd_[i] = -1;
+        if (dmafd_[i] >= 0)
+        {
+            close(dmafd_[i]);
+            dmafd_[i] = -1;
+        }
     }
 
     // request buffers to 0
@@ -883,7 +952,8 @@ int V4l2CameraPlugin::getBufferFd(int *bufFd, int *count)
     struct v4l2_exportbuffer expbuf;
     *count = 0;
 
-    for (unsigned int i = 0; i < n_buffers_; ++i)
+    // dmafd_ has room for CONST_MAX_BUFFER_NUM entries only
+    for (unsigned int i = 0; i < n_buffers_ && i < CONST_MAX_BUFFER_NUM; ++i)
     {
         CLEAR(expbuf);
         expbuf.type  = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -923,6 +993,8 @@ int V4l2CameraPlugin::requestBuffersToV4l2(unsigned int count, unsigned int type
         PLOGE("requestBuffersToZero failed %d, %s", errno, strerror(errno));
         return CAMERA_ERROR_UNKNOWN;
     }
+    // the driver may have adjusted the number of buffers
+    n_buffers_ = req.count;
     return retVal;
 }
 
@@ -1017,7 +1089,7 @@ int V4l2CameraPlugin::xioctl(int fh, unsigned long request, void *arg)
     do
     {
         ret = ioctl(fh, request, arg);
-    } while (ret == -1 && ((errno == EINTR) || (errno == EAGAIN)));
+    } while (ret == -1 && (errno == EINTR));
 
     return ret;
 }
