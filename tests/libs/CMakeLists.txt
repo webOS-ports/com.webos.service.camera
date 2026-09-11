@@ -9,5 +9,6 @@ include_directories(${CMAKE_SOURCE_DIR}/src/libs/include/private)
 include_directories(${CMAKE_SOURCE_DIR}/src/libs/include/public/camera)
 
 add_executable (test_camera_shared_memory ${UNIT_TEST_SOURCES})
-target_link_libraries (test_camera_shared_memory ${WEBOS_GTEST_LIBRARIES} camera_shared_memory pthread rt)
+target_link_libraries (test_camera_shared_memory ${WEBOS_GTEST_LIBRARIES} camera_shared_memory
+                       ${PMLOGLIB_LDFLAGS} pthread rt)
 install(TARGETS test_camera_shared_memory DESTINATION ${WEBOS_INSTALL_SBINDIR})
