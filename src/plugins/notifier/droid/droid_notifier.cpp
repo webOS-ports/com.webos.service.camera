@@ -27,6 +27,7 @@
 
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -58,12 +59,11 @@
  * gst-droid-gate.service), so a hardcoded path probe misses it. */
 static int droid_camera_count()
 {
-    static bool gst_ready = false;
-    if (!gst_ready)
-    {
-        gst_init(nullptr, nullptr);
-        gst_ready = true;
-    }
+    /* gst_init() has no internal guard, and this runs on the probe thread
+     * while other plugins may be initializing GStreamer from the main loop;
+     * a plain bool would let both initialize concurrently. */
+    static std::once_flag gst_once;
+    std::call_once(gst_once, []() { gst_init(nullptr, nullptr); });
 
     GstElement *e = gst_element_factory_make("droidcamsrc", nullptr);
     if (!e)
@@ -129,9 +129,11 @@ std::vector<DEVICE_LIST_T> BuildDeviceList(int count)
  * happens where it expects to be called. */
 gboolean PublishOnMainLoop(gpointer data)
 {
-    std::unique_ptr<std::shared_ptr<ProbeState>> holder(
-        static_cast<std::shared_ptr<ProbeState> *>(data));
-    ProbeState *st = holder->get();
+    /* Not deleted here: the holder belongs to the source's GDestroyNotify,
+     * which also runs when the context is torn down before this ever
+     * dispatches - deleting in both places would double-free, deleting only
+     * here would leak on that path. */
+    ProbeState *st = static_cast<std::shared_ptr<ProbeState> *>(data)->get();
 
     if (!st->cancelled.load() && st->cb)
     {
@@ -140,6 +142,11 @@ gboolean PublishOnMainLoop(gpointer data)
         st->cb("droid", &devList);
     }
     return G_SOURCE_REMOVE;
+}
+
+void DestroyProbeStateHolder(gpointer data)
+{
+    delete static_cast<std::shared_ptr<ProbeState> *>(data);
 }
 
 gpointer ProbeThread(gpointer data)
@@ -155,7 +162,10 @@ gpointer ProbeThread(gpointer data)
         if (count > 0)
             break;
         PLOGI("no droid cameras yet (attempt %d/%d), retrying", attempt + 1, kProbeAttempts);
-        usleep(kProbeRetryUs);
+        /* nothing follows the last attempt, so the pause would only delay the
+         * empty announcement */
+        if (attempt + 1 < kProbeAttempts)
+            usleep(kProbeRetryUs);
     }
 
     if (st->cancelled.load())
@@ -165,7 +175,7 @@ gpointer ProbeThread(gpointer data)
 
     GSource *idle = g_idle_source_new();
     g_source_set_callback(idle, PublishOnMainLoop,
-                          new std::shared_ptr<ProbeState>(st), nullptr);
+                          new std::shared_ptr<ProbeState>(st), DestroyProbeStateHolder);
     g_source_attach(idle, st->ctx);
     g_source_unref(idle);
     return nullptr;
@@ -192,6 +202,11 @@ public:
 
     virtual void subscribeToClient(handlercb cb, void *mainLoop) override
     {
+        /* A probe from an earlier subscription may still be running; make sure
+         * its late result cannot fire the old callback. */
+        if (state_)
+            state_->cancelled = true;
+
         state_      = std::make_shared<ProbeState>();
         state_->ctx = mainLoop ? g_main_loop_get_context(static_cast<GMainLoop *>(mainLoop))
                                : nullptr;
