@@ -19,6 +19,7 @@
 #include "camera_constants.h"
 #include "camera_log.h"
 #include "plugin.hpp"
+#include <csetjmp>
 #include <cstdio>
 #include <cstdlib>
 #include <jpeglib.h>
@@ -121,10 +122,11 @@ void FaceDetectionAIF::initialize(const void *streamFormat, const std::string &s
 void FaceDetectionAIF::release(void)
 {
     PLOGI("");
-    mtxAi_.lock();
-    EdgeAIVision::getInstance().deleteDetector(type);
-    EdgeAIVision::getInstance().shutdown();
-    mtxAi_.unlock();
+    {
+        std::lock_guard<std::mutex> lock(mtxAi_);
+        EdgeAIVision::getInstance().deleteDetector(type);
+        EdgeAIVision::getInstance().shutdown();
+    }
     CameraSolutionAsync::release();
     PLOGI("");
 }
@@ -227,12 +229,40 @@ bool FaceDetectionAIF::detectFace(void)
     // return pResults[0] > 0 ? true : false;
 }
 
+namespace
+{
+// setjmp/longjmp based libjpeg error handling : the default error_exit
+// calls exit() on a corrupt frame, which must not kill the process.
+struct FDJpegErrorMgr
+{
+    struct jpeg_error_mgr pub;
+    jmp_buf setjmpBuffer;
+};
+
+void fdJpegErrorExit(j_common_ptr cinfo)
+{
+    FDJpegErrorMgr *err = reinterpret_cast<FDJpegErrorMgr *>(cinfo->err);
+    char msg[JMSG_LENGTH_MAX];
+    (*cinfo->err->format_message)(cinfo, msg);
+    PLOGE("libjpeg error: %s", msg);
+    longjmp(err->setjmpBuffer, 1);
+}
+} // namespace
+
 bool FaceDetectionAIF::decodeJpeg(void)
 {
     struct jpeg_decompress_struct cinfo;
-    struct jpeg_error_mgr jerr;
+    struct FDJpegErrorMgr jerr;
 
-    cinfo.err = jpeg_std_error(&jerr);
+    cinfo.err           = jpeg_std_error(&jerr.pub);
+    jerr.pub.error_exit = fdJpegErrorExit;
+    if (setjmp(jerr.setjmpBuffer))
+    {
+        PLOGE("Image decoding is failed");
+        jpeg_destroy_decompress(&cinfo);
+        return false;
+    }
+
     jpeg_create_decompress(&cinfo);
 
     auto &buf = queueJob_.front();
@@ -241,6 +271,7 @@ bool FaceDetectionAIF::decodeJpeg(void)
     if (jpeg_read_header(&cinfo, TRUE) != 1)
     {
         PLOGI("Image decoding is failed");
+        jpeg_destroy_decompress(&cinfo);
         return false;
     }
 
@@ -257,9 +288,9 @@ bool FaceDetectionAIF::decodeJpeg(void)
     oDecodedImage_.outColorSpace_ = cinfo.out_color_space;
     oDecodedImage_.outWidth_      = cinfo.output_width;
     oDecodedImage_.outHeight_     = cinfo.output_height;
-    oDecodedImage_.outChannels_   = (cinfo.num_components > 0) ? cinfo.num_components : 0;
+    oDecodedImage_.outChannels_   = (cinfo.output_components > 0) ? cinfo.output_components : 0;
     oDecodedImage_.outStride_ =
-        cinfo.output_width * ((cinfo.num_components > 0) ? cinfo.num_components : 0);
+        cinfo.output_width * ((cinfo.output_components > 0) ? cinfo.output_components : 0);
 
     oDecodedImage_.prepareImage();
 
