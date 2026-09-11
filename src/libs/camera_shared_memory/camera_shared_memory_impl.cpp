@@ -29,6 +29,17 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+namespace
+{
+// 7680 * 4320 * 2 : one packed 8K 16bpp frame, same ceiling the legacy SysV
+// implementation used.
+constexpr size_t kMaxDataSize     = 66355200;
+constexpr size_t kMaxMetaSize     = 4 * 1024 * 1024;
+constexpr size_t kMaxExtraSize    = 4 * 1024 * 1024;
+constexpr size_t kMaxSolutionSize = 4 * 1024 * 1024;
+constexpr size_t kMaxBufferCount  = 64;
+} // namespace
+
 CameraSharedMemoryImpl::CameraSharedMemoryImpl()
     : shmFd_(-1), shmAddr_(nullptr), shmSize_(0), shmHeader_(nullptr)
 {
@@ -42,13 +53,79 @@ CameraSharedMemoryImpl::~CameraSharedMemoryImpl()
     close();
 }
 
-int CameraSharedMemoryImpl::create(const std::string name, size_t dataSize, size_t metaSize,
+bool CameraSharedMemoryImpl::validateGeometry(size_t dataSize, size_t metaSize, size_t extraSize,
+                                              size_t solutionSize, size_t bufferCount,
+                                              size_t *pSectionSize, size_t *pTotalSize)
+{
+    if (bufferCount == 0 || bufferCount > kMaxBufferCount || dataSize == 0 ||
+        dataSize > kMaxDataSize || metaSize > kMaxMetaSize || extraSize > kMaxExtraSize ||
+        solutionSize > kMaxSolutionSize)
+    {
+        PLOGE("geometry out of range: data(%zu) meta(%zu) extra(%zu) solution(%zu) count(%zu)",
+              dataSize, metaSize, extraSize, solutionSize, bufferCount);
+        return false;
+    }
+
+    // With the caps above none of this arithmetic can overflow size_t, but
+    // keep it explicit so a cap change cannot silently reintroduce a wrap.
+    size_t sectionSize = 0;
+    size_t totalSize   = 0;
+    if (__builtin_add_overflow(dataSize, metaSize, &sectionSize) ||
+        __builtin_add_overflow(sectionSize, extraSize, &sectionSize) ||
+        __builtin_add_overflow(sectionSize, solutionSize, &sectionSize) ||
+        __builtin_add_overflow(sectionSize, sizeof(size_t) * 4, &sectionSize) ||
+        __builtin_mul_overflow(sectionSize, bufferCount, &totalSize) ||
+        __builtin_add_overflow(totalSize, sizeof(ShmHeader), &totalSize))
+    {
+        PLOGE("geometry overflow");
+        return false;
+    }
+
+    if (pSectionSize)
+        *pSectionSize = sectionSize;
+    if (pTotalSize)
+        *pTotalSize = totalSize;
+    return true;
+}
+
+void CameraSharedMemoryImpl::resetLocked(void)
+{
+    shmHeader_ = nullptr;
+    shmBuffers_.clear();
+    bufferCount_ = dataSize_ = metaSize_ = extraSize_ = solutionSize_ = 0;
+    if (shmAddr_)
+    {
+        munmap(shmAddr_, shmSize_);
+        shmAddr_ = nullptr;
+    }
+    shmSize_ = 0;
+    if (shmFd_ != -1)
+    {
+        ::close(shmFd_);
+        shmFd_ = -1;
+    }
+    if (isCreated_ && !shmName_.empty())
+    {
+        shm_unlink(shmName_.c_str());
+    }
+    shmName_   = "";
+    isCreated_ = false;
+}
+
+int CameraSharedMemoryImpl::create(const std::string &name, size_t dataSize, size_t metaSize,
                                    size_t extraSize, size_t solutionSize, size_t bufferCount)
 {
     PLOGI("name(%s) data(%zu) meta(%zu) extra(%zu) solution(%zu) count(%zu)", name.c_str(),
           dataSize, metaSize, extraSize, solutionSize, bufferCount);
 
     std::lock_guard<std::mutex> lock(m_);
+
+    size_t totalSize = 0;
+    if (!validateGeometry(dataSize, metaSize, extraSize, solutionSize, bufferCount, nullptr,
+                          &totalSize))
+    {
+        return -1;
+    }
 
     shmFd_ =
         shm_open(name.c_str(), O_CREAT | O_EXCL | O_RDWR, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
@@ -58,17 +135,14 @@ int CameraSharedMemoryImpl::create(const std::string name, size_t dataSize, size
         return -1;
     }
     isCreated_ = true;
+    shmName_   = name; // set before the fallible calls so resetLocked() can unlink
 
-    size_t headerSize      = sizeof(ShmHeader);
-    size_t dataSectionSize = dataSize + metaSize + extraSize + solutionSize + sizeof(size_t) * 4;
-    shmSize_               = headerSize + bufferCount * dataSectionSize;
-    PLOGI("headerSize(%zu) dataSectionSize(%zu) shmSize(%zu)", headerSize, dataSectionSize,
-          shmSize_);
+    shmSize_ = totalSize;
+    PLOGI("headerSize(%zu) shmSize(%zu)", sizeof(ShmHeader), shmSize_);
     if (ftruncate(shmFd_, shmSize_) == -1)
     {
         PLOGE("ftruncate failed");
-        ::close(shmFd_);
-        shmFd_ = -1;
+        resetLocked();
         return -1;
     }
 
@@ -77,23 +151,10 @@ int CameraSharedMemoryImpl::create(const std::string name, size_t dataSize, size
     {
         PLOGE("mmap failed");
         shmAddr_ = nullptr;
-        ::close(shmFd_);
-        shmFd_ = -1;
+        resetLocked();
         return -1;
     }
 
-    struct stat sb;
-    if (fstat(shmFd_, &sb) == -1)
-    {
-        PLOGE("fstat failed");
-        ::close(shmFd_);
-        shmFd_ = -1;
-        return -1;
-    }
-    size_t stSize_ = sb.st_size;
-    PLOGI("st_size(%zu)", stSize_);
-
-    shmName_                 = name;
     shmHeader_               = static_cast<ShmHeader *>(shmAddr_);
     shmHeader_->writeIndex   = -1;
     shmHeader_->bufferCount  = bufferCount;
@@ -101,6 +162,12 @@ int CameraSharedMemoryImpl::create(const std::string name, size_t dataSize, size
     shmHeader_->metaSize     = metaSize;
     shmHeader_->extraSize    = extraSize;
     shmHeader_->solutionSize = solutionSize;
+
+    bufferCount_  = bufferCount;
+    dataSize_     = dataSize;
+    metaSize_     = metaSize;
+    extraSize_    = extraSize;
+    solutionSize_ = solutionSize;
 
     initBuffers();
     for (auto &buffer : shmBuffers_)
@@ -115,7 +182,7 @@ int CameraSharedMemoryImpl::create(const std::string name, size_t dataSize, size
     return shmFd_;
 }
 
-int CameraSharedMemoryImpl::open(const std::string name)
+int CameraSharedMemoryImpl::open(const std::string &name)
 {
     PLOGI("name(%s)", name.c_str());
 
@@ -131,6 +198,7 @@ int CameraSharedMemoryImpl::open(const std::string name)
     if (!initShmem(fd))
     {
         PLOGE("initShmem Fail!");
+        ::close(fd);
         return -1;
     }
 
@@ -168,19 +236,46 @@ bool CameraSharedMemoryImpl::initShmem(int fd)
         PLOGE("Failed to get size of shared memory");
         return false;
     }
-    size_t shmSize_ = sb.st_size;
-    PLOGI("shm size %zu", shmSize_);
+    if (sb.st_size < 0 || static_cast<size_t>(sb.st_size) < sizeof(ShmHeader))
+    {
+        PLOGE("shared memory too small (%lld)", (long long)sb.st_size);
+        return false;
+    }
+    size_t mappedSize = static_cast<size_t>(sb.st_size);
+    PLOGI("shm size %zu", mappedSize);
 
-    shmAddr_ = (ShmHeader *)mmap(0, shmSize_, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if (shmAddr_ == MAP_FAILED)
+    void *addr = mmap(0, mappedSize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (addr == MAP_FAILED)
     {
         PLOGE("shmem mmap fail!");
-        shmAddr_ = nullptr;
         return false;
     }
 
-    shmHeader_ = static_cast<ShmHeader *>(shmAddr_);
-    shmFd_     = fd;
+    // The header was written by the peer process. Validate every field before
+    // it is used for pointer arithmetic, and keep validated copies: the peer
+    // stays able to rewrite the mapped header afterwards, so it must never be
+    // re-trusted (double-fetch).
+    ShmHeader *header  = static_cast<ShmHeader *>(addr);
+    size_t sectionSize = 0;
+    size_t totalSize   = 0;
+    if (!validateGeometry(header->dataSize, header->metaSize, header->extraSize,
+                          header->solutionSize, header->bufferCount, &sectionSize, &totalSize) ||
+        totalSize > mappedSize)
+    {
+        PLOGE("invalid shared memory header (need %zu, mapped %zu)", totalSize, mappedSize);
+        munmap(addr, mappedSize);
+        return false;
+    }
+
+    shmAddr_      = addr;
+    shmSize_      = mappedSize;
+    shmHeader_    = header;
+    shmFd_        = fd;
+    bufferCount_  = header->bufferCount;
+    dataSize_     = header->dataSize;
+    metaSize_     = header->metaSize;
+    extraSize_    = header->extraSize;
+    solutionSize_ = header->solutionSize;
 
     printShmHeader();
     return true;
@@ -189,11 +284,10 @@ bool CameraSharedMemoryImpl::initShmem(int fd)
 void CameraSharedMemoryImpl::initBuffers(void)
 {
     size_t headerSize      = sizeof(ShmHeader);
-    size_t dataSectionSize = shmHeader_->dataSize + shmHeader_->metaSize + shmHeader_->extraSize +
-                             shmHeader_->solutionSize + sizeof(size_t) * 4;
+    size_t dataSectionSize = dataSize_ + metaSize_ + extraSize_ + solutionSize_ + sizeof(size_t) * 4;
 
-    shmBuffers_.resize(shmHeader_->bufferCount);
-    for (size_t i = 0; i < shmHeader_->bufferCount; ++i)
+    shmBuffers_.resize(bufferCount_);
+    for (size_t i = 0; i < bufferCount_; ++i)
     {
         unsigned char *base =
             static_cast<unsigned char *>(shmAddr_) + headerSize + i * dataSectionSize;
@@ -201,16 +295,14 @@ void CameraSharedMemoryImpl::initBuffers(void)
         shmBuffers_[i].pDataSize = reinterpret_cast<size_t *>(base);
         shmBuffers_[i].pData =
             reinterpret_cast<unsigned char *>(shmBuffers_[i].pDataSize) + sizeof(size_t);
-        shmBuffers_[i].pMetaSize =
-            reinterpret_cast<size_t *>(shmBuffers_[i].pData + shmHeader_->dataSize);
+        shmBuffers_[i].pMetaSize = reinterpret_cast<size_t *>(shmBuffers_[i].pData + dataSize_);
         shmBuffers_[i].pMeta =
             reinterpret_cast<unsigned char *>(shmBuffers_[i].pMetaSize) + sizeof(size_t);
-        shmBuffers_[i].pExtraSize =
-            reinterpret_cast<size_t *>(shmBuffers_[i].pMeta + shmHeader_->metaSize);
+        shmBuffers_[i].pExtraSize = reinterpret_cast<size_t *>(shmBuffers_[i].pMeta + metaSize_);
         shmBuffers_[i].pExtra =
             reinterpret_cast<unsigned char *>(shmBuffers_[i].pExtraSize) + sizeof(size_t);
         shmBuffers_[i].pSolutionSize =
-            reinterpret_cast<size_t *>(shmBuffers_[i].pExtra + shmHeader_->extraSize);
+            reinterpret_cast<size_t *>(shmBuffers_[i].pExtra + extraSize_);
         shmBuffers_[i].pSolution =
             reinterpret_cast<unsigned char *>(shmBuffers_[i].pSolutionSize) + sizeof(size_t);
     }
@@ -231,27 +323,7 @@ void CameraSharedMemoryImpl::close(void)
     PLOGI("start");
 
     std::lock_guard<std::mutex> lock(m_);
-
-    if (shmHeader_)
-    {
-        shmHeader_ = nullptr;
-    }
-    if (shmAddr_)
-    {
-        munmap(shmAddr_, shmSize_);
-        shmAddr_ = nullptr;
-    }
-    if (shmFd_ != -1)
-    {
-        ::close(shmFd_);
-        shmFd_ = -1;
-    }
-    if (isCreated_ && !shmName_.empty())
-    {
-        shm_unlink(shmName_.c_str());
-        shmName_ = "";
-    }
-    isCreated_ = false;
+    resetLocked();
 
     PLOGI("end");
 }
@@ -260,16 +332,18 @@ bool CameraSharedMemoryImpl::incrementWriteIndex(void)
 {
     std::lock_guard<std::mutex> lock(m_);
 
-    if (!shmHeader_)
+    if (!shmHeader_ || shmBuffers_.empty())
     {
         PLOGE("shmHeader_ is NULL");
         return false;
     }
 
-    if (shmHeader_->writeIndex < INT_MAX)
-        shmHeader_->writeIndex++;
-    if (shmHeader_->writeIndex >= (int)shmHeader_->bufferCount)
-        shmHeader_->writeIndex = 0;
+    int index = shmHeader_->writeIndex;
+    if (index < 0 || index >= (int)shmBuffers_.size() - 1)
+        index = 0;
+    else
+        index += 1;
+    shmHeader_->writeIndex = index;
 
     PLOGD("writeIndex(%d)", shmHeader_->writeIndex);
     return true;
@@ -287,9 +361,15 @@ bool CameraSharedMemoryImpl::writeHeader(int index, size_t dataSize)
         return false;
     }
 
-    if (index < 0 || index >= (int)shmHeader_->bufferCount)
+    if (index < 0 || index >= (int)shmBuffers_.size())
     {
         PLOGE("index is out of range (%d)", index);
+        return false;
+    }
+
+    if (dataSize > dataSize_)
+    {
+        PLOGE("dataSize(%zu) exceeds buffer capacity(%zu)", dataSize, dataSize_);
         return false;
     }
 
@@ -344,15 +424,15 @@ bool CameraSharedMemoryImpl::getBufferInfo(size_t *pBufferCount, size_t *pDataSi
     }
 
     if (pBufferCount)
-        *pBufferCount = shmHeader_->bufferCount;
+        *pBufferCount = bufferCount_;
     if (pDataSize)
-        *pDataSize = shmHeader_->dataSize;
+        *pDataSize = dataSize_;
     if (pMetaSize)
-        *pMetaSize = shmHeader_->metaSize;
+        *pMetaSize = metaSize_;
     if (pExtraSize)
-        *pExtraSize = shmHeader_->extraSize;
+        *pExtraSize = extraSize_;
     if (pSolutionSize)
-        *pSolutionSize = shmHeader_->solutionSize;
+        *pSolutionSize = solutionSize_;
 
     return true;
 }
@@ -379,7 +459,8 @@ bool CameraSharedMemoryImpl::read(unsigned char **ppData, size_t *pDataSize, uns
         if (readData(ppData, pDataSize, ppMeta, pMetaSize, ppExtra, pExtraSize, ppSolution,
                      pSolutionSize))
         {
-            PLOGD("read done! data(%p) length(%zu)", *ppData, *pDataSize);
+            if (ppData && pDataSize)
+                PLOGD("read done! data(%p) length(%zu)", *ppData, *pDataSize);
             return true;
         }
 
@@ -397,42 +478,51 @@ bool CameraSharedMemoryImpl::readData(unsigned char **ppData, size_t *pDataSize,
 {
     std::lock_guard<std::mutex> lock(m_);
 
-    if (!shmHeader_)
+    if (!shmHeader_ || shmBuffers_.empty())
     {
         PLOGE("shmHeader_ is NULL");
         return false;
     }
 
-    if (shmHeader_->writeIndex == -1)
+    // writeIndex lives in the shared header: snapshot it once and bound it by
+    // our own (peer-immutable) buffer vector, not by the shared bufferCount.
+    int writeIndex = shmHeader_->writeIndex;
+    if (writeIndex == -1)
     {
         PLOGE("No data has been written yet.");
         return false;
     }
+    size_t count = shmBuffers_.size();
+    if (writeIndex < 0 || static_cast<size_t>(writeIndex) >= count)
+    {
+        PLOGE("corrupt writeIndex(%d)", writeIndex);
+        return false;
+    }
 
-    int readIndex =
-        (shmHeader_->writeIndex + shmHeader_->bufferCount - 1) % shmHeader_->bufferCount;
-    PLOGD("writeIndex(%d) readIndex(%d)", shmHeader_->writeIndex, readIndex);
+    size_t readIndex = (static_cast<size_t>(writeIndex) + count - 1) % count;
+    PLOGD("writeIndex(%d) readIndex(%zu)", writeIndex, readIndex);
     const ShmBuffer &buffer = shmBuffers_[readIndex];
 
     if (ppData)
         *ppData = buffer.pData;
     if (pDataSize)
-        *pDataSize = *buffer.pDataSize;
+    {
+        // The per-buffer size slot is peer-writable too: clamp to capacity.
+        size_t dataSize = *buffer.pDataSize;
+        *pDataSize      = (dataSize <= dataSize_) ? dataSize : dataSize_;
+    }
     if (ppMeta)
         *ppMeta = buffer.pMeta;
-    // metaSize     = *buffer.pMetaSize;
     if (pMetaSize)
-        *pMetaSize = shmHeader_->metaSize;
+        *pMetaSize = metaSize_;
     if (ppExtra)
         *ppExtra = buffer.pExtra;
-    // extraSize    = *buffer.pExtraSize;
     if (pExtraSize)
-        *pExtraSize = shmHeader_->extraSize;
+        *pExtraSize = extraSize_;
     if (ppSolution)
         *ppSolution = buffer.pSolution;
-    // solutionSize = *buffer.pSolutionSize;
     if (pSolutionSize)
-        *pSolutionSize = shmHeader_->solutionSize;
+        *pSolutionSize = solutionSize_;
 
     return true;
 }
@@ -444,15 +534,26 @@ bool CameraSharedMemoryImpl::write(const unsigned char *pData, size_t dataSize,
 {
     std::lock_guard<std::mutex> lock(m_);
 
-    if (!shmHeader_)
+    if (!shmHeader_ || shmBuffers_.empty())
     {
         PLOGE("shmHeader_ is NULL");
         return false;
     }
 
-    if (shmHeader_->writeIndex < 0) // first write
-        shmHeader_->writeIndex = 0;
-    ShmBuffer &buffer = shmBuffers_[shmHeader_->writeIndex];
+    if ((pData && dataSize > dataSize_) || (pMeta && metaSize > metaSize_) ||
+        (pExtra && extraSize > extraSize_) || (pSolution && solutionSize > solutionSize_))
+    {
+        PLOGE("write size exceeds capacity: data(%zu/%zu) meta(%zu/%zu) extra(%zu/%zu) "
+              "solution(%zu/%zu)",
+              dataSize, dataSize_, metaSize, metaSize_, extraSize, extraSize_, solutionSize,
+              solutionSize_);
+        return false;
+    }
+
+    int writeIndex = shmHeader_->writeIndex;
+    if (writeIndex < 0 || static_cast<size_t>(writeIndex) >= shmBuffers_.size())
+        writeIndex = 0; // first write, or index corrupted by a peer
+    ShmBuffer &buffer = shmBuffers_[writeIndex];
 
     if (pData)
     {
@@ -478,7 +579,7 @@ bool CameraSharedMemoryImpl::write(const unsigned char *pData, size_t dataSize,
         memcpy(buffer.pSolution, pSolution, solutionSize);
     }
 
-    shmHeader_->writeIndex = (shmHeader_->writeIndex + 1) % shmHeader_->bufferCount;
+    shmHeader_->writeIndex = (writeIndex + 1) % static_cast<int>(shmBuffers_.size());
 
     return true;
 }
@@ -497,6 +598,7 @@ int CameraSharedMemoryImpl::createSignal(const std::string &name)
     if (!attachSignal(efd, name))
     {
         PLOGE("Fail to attach");
+        ::close(efd);
         return -1;
     }
 
@@ -516,6 +618,12 @@ bool CameraSharedMemoryImpl::attachSignal(int fd, const std::string &name)
         return false;
     }
 
+    auto it = signalFdMap_.find(name);
+    if (it != signalFdMap_.end() && it->second != fd)
+    {
+        PLOGI("replacing fd(%d) for name(%s)", it->second, name.c_str());
+        ::close(it->second);
+    }
     signalFdMap_[name] = fd;
     PLOGI("attached fd(%d)", fd);
     return true;
@@ -525,16 +633,19 @@ bool CameraSharedMemoryImpl::notifySignal(void)
 {
     std::lock_guard<std::mutex> lock(m_);
 
-    PLOGD("eventValue_ %llu", (unsigned long long)eventValue_);
+    // eventfd read() returns the sum of the written values; a constant 1 per
+    // notification is all a level-style wakeup needs (writing an incrementing
+    // counter made the very first notification write 0, which never wakes the
+    // poller).
+    const uint64_t one = 1;
     for (const auto &[name, fd] : signalFdMap_)
     {
-        if (::write(fd, &eventValue_, sizeof(eventValue_)) != sizeof(eventValue_))
+        if (::write(fd, &one, sizeof(one)) != sizeof(one))
         {
             PLOGE("efd write error, fd %d", fd);
         }
     }
 
-    ++eventValue_;
     return true;
 }
 
@@ -574,17 +685,25 @@ bool CameraSharedMemoryImpl::waitForSignal(int timeoutMs, const std::string &nam
 
     PLOGD("name(%s) (timeout %d ms)", name.c_str(), timeoutMs);
 
-    if (signalFdMap_.find(name) == signalFdMap_.end())
+    auto it = signalFdMap_.find(name);
+    if (it == signalFdMap_.end())
     {
         PLOGE("unknown signal name(%s)", name.c_str());
         return false;
     }
-    int efd = signalFdMap_[name];
+    int efd = it->second;
 
     struct pollfd fds = {efd, POLLIN, 0};
 
     PLOGD("name(%s) start waiting for eventfd (%d) (timeout %d ms)", name.c_str(), efd, timeoutMs);
+
+    // Poll without holding the object lock: a wait of up to timeoutMs must not
+    // block writers/notifiers using this object from other threads. If the fd
+    // is detached while unlocked, poll reports POLLNVAL and we bail out.
+    lock.unlock();
     int ret = poll(&fds, 1, timeoutMs);
+    lock.lock();
+
     if (ret == -1)
     {
         PLOGE("Poll failure: %s", strerror(errno));
@@ -596,13 +715,25 @@ bool CameraSharedMemoryImpl::waitForSignal(int timeoutMs, const std::string &nam
         return false;
     }
 
+    if (fds.revents & (POLLNVAL | POLLERR))
+    {
+        PLOGE("eventfd (%d) no longer valid", efd);
+        return false;
+    }
+
     if (!(fds.revents & POLLIN))
     {
         PLOGE("POLLIN event did not occur!");
         return false;
     }
 
-    // lock.unlock(); static issue impact: Medium. desc: Double unlock(LOCK)
+    // Make sure the fd was not detached (and possibly reused) while unlocked.
+    it = signalFdMap_.find(name);
+    if (it == signalFdMap_.end() || it->second != efd)
+    {
+        PLOGE("signal (%s) detached while waiting", name.c_str());
+        return false;
+    }
 
     uint64_t value;
     for (int retry = 0; retry < 100; ++retry)
@@ -630,7 +761,7 @@ int CameraSharedMemoryImpl::getWriteIndex(void)
     if (!shmHeader_)
     {
         PLOGE("shmHeader_ is NULL");
-        return false;
+        return -1;
     }
 
     PLOGD("writeIndex(%d)", shmHeader_->writeIndex);
