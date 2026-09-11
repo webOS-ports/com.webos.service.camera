@@ -100,11 +100,16 @@ CameraHalProxy::CameraHalProxy() : state_(State::INIT)
         PLOGE("Caught a system_error with code %d meaning %s", e.code().value(), e.what());
     }
 
-    while (!g_main_loop_is_running(loop_))
+    int retry = 0;
+    while (!g_main_loop_is_running(loop_) && retry++ < 10000)
     {
+        g_usleep(1000);
     }
 
-    pthread_setname_np(loopThread_->native_handle(), "halproxy_luna");
+    if (loopThread_)
+    {
+        pthread_setname_np(loopThread_->native_handle(), "halproxy_luna");
+    }
 
     std::string guid         = GenerateUniqueID()();
     std::string service_name = cstr_uricameramain + "." + guid;
@@ -137,7 +142,7 @@ CameraHalProxy::~CameraHalProxy()
     }
 
     g_main_loop_quit(loop_);
-    if (loopThread_->joinable())
+    if (loopThread_ && loopThread_->joinable())
     {
         try
         {
@@ -289,11 +294,16 @@ DEVICE_RETURN_CODE_T CameraHalProxy::getDeviceInfo(std::string strdevicenode,
         PLOGE("Caught a system_error with code %d meaning %s", e.code().value(), e.what());
     }
 
-    while (!g_main_loop_is_running(lp))
+    int retry = 0;
+    while (!g_main_loop_is_running(lp) && retry++ < 10000)
     {
+        g_usleep(1000);
     }
 
-    pthread_setname_np(lpthd->native_handle(), "getinfo_luna");
+    if (lpthd)
+    {
+        pthread_setname_np(lpthd->native_handle(), "getinfo_luna");
+    }
 
     std::string ls_service_name    = CameraHalProcessName + "." + __func__;
     std::unique_ptr<LunaClient> lc = std::make_unique<LunaClient>(ls_service_name.c_str(), c);
@@ -329,16 +339,24 @@ DEVICE_RETURN_CODE_T CameraHalProxy::getDeviceInfo(std::string strdevicenode,
         pinfo->b_builtin = get_optional<int>(j, CONST_PARAM_NAME_BUILTIN).value_or(0);
 
         auto r = j[CONST_PARAM_NAME_RESOLUTION];
-        for (json::iterator it = r.begin(); it != r.end(); ++it)
+        if (r.is_object())
         {
-            std::vector<std::string> v_res;
-            for (const auto &item : it.value())
+            for (json::iterator it = r.begin(); it != r.end(); ++it)
             {
-                v_res.emplace_back(item);
+                if (!it.value().is_array())
+                    continue;
+
+                std::vector<std::string> v_res;
+                for (const auto &item : it.value())
+                {
+                    if (!item.is_string())
+                        continue;
+                    v_res.emplace_back(item);
+                }
+                camera_format_t eformat;
+                convertFormatToCode(it.key(), &eformat);
+                pinfo->stResolution.emplace_back(v_res, eformat);
             }
-            camera_format_t eformat;
-            convertFormatToCode(it.key(), &eformat);
-            pinfo->stResolution.emplace_back(v_res, eformat);
         }
     }
     else
@@ -348,7 +366,7 @@ DEVICE_RETURN_CODE_T CameraHalProxy::getDeviceInfo(std::string strdevicenode,
     }
 
     g_main_loop_quit(lp);
-    if (lpthd->joinable())
+    if (lpthd && lpthd->joinable())
     {
         try
         {
@@ -374,20 +392,23 @@ DEVICE_RETURN_CODE_T CameraHalProxy::getDeviceProperty(CAMERA_PROPERTIES_T *opar
     {
         auto jobj_params = jOut[CONST_PARAM_NAME_PARAMS];
 
-        for (json::iterator it = jobj_params.begin(); it != jobj_params.end(); ++it)
+        if (jobj_params.is_object())
         {
-            if (it.value().is_object() == false)
-                continue;
-
-            int i = getParamNumFromString(it.key());
-            if (i >= 0)
+            for (json::iterator it = jobj_params.begin(); it != jobj_params.end(); ++it)
             {
-                json queries = jobj_params[it.key()];
-                for (json::iterator q = queries.begin(); q != queries.end(); ++q)
+                if (it.value().is_object() == false)
+                    continue;
+
+                int i = getParamNumFromString(it.key());
+                if (i >= 0)
                 {
-                    int n = getQueryNumFromString(q.key());
-                    if (n >= 0)
-                        oparams->stGetData.data[i][n] = q.value();
+                    json queries = jobj_params[it.key()];
+                    for (json::iterator q = queries.begin(); q != queries.end(); ++q)
+                    {
+                        int n = getQueryNumFromString(q.key());
+                        if (n >= 0 && q.value().is_number())
+                            oparams->stGetData.data[i][n] = q.value();
+                    }
                 }
             }
         }
@@ -633,24 +654,25 @@ DEVICE_RETURN_CODE_T CameraHalProxy::luna_call_sync(const char *func, const std:
     std::string uri = service_uri_ + func;
     PLOGI("%s '%s'", uri.c_str(), payload.c_str());
 
+    // clear the previous response so a failed call can never reuse it
+    jOut = json();
+
     std::string resp;
     int64_t startClk = g_get_monotonic_time();
-    luna_client->callSync(uri.c_str(), payload.c_str(), &resp, timeout, fd);
-    int64_t endClk = g_get_monotonic_time();
+    bool call_ok     = luna_client->callSync(uri.c_str(), payload.c_str(), &resp, timeout, fd);
+    int64_t endClk   = g_get_monotonic_time();
 
     (startClk > endClk) ? PLOGE("diffClk is error")
                         : PLOGI("response %s, runtime %lld", resp.c_str(),
                                 (long long int)((endClk - startClk) / 1000));
 
-    try
+    if (!call_ok)
     {
-        jOut = json::parse(resp);
-    }
-    catch (const std::exception &e)
-    {
-        PLOGE("Error parsing JSON: %s", e.what());
+        PLOGE("callSync failed");
+        return DEVICE_ERROR_TIMEOUT;
     }
 
+    jOut = json::parse(resp, nullptr, false);
     if (jOut.is_discarded())
     {
         PLOGE("payload parsing error!");

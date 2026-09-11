@@ -220,10 +220,7 @@ std::string EventNotification::getCameraIdFromKey(std::string key)
     auto split_pos = key.find("_");
     if (split_pos != key.npos)
     {
-        if (split_pos + 1 < SIZE_MAX)
-        {
-            str_reply = key.substr(split_pos + 1);
-        }
+        str_reply = key.substr(split_pos + 1);
     }
 
     return str_reply;
@@ -239,8 +236,8 @@ void EventNotification::removeSubscription(LSHandle *lsHandle, int camera_id)
     LSSubscriptionIter *LSiter = NULL;
 
     std::string key_camera     = "_camera";
-    std::string key_format     = CONST_EVENT_KEY_PROPERTIES;
-    std::string key_properties = CONST_EVENT_KEY_FORMAT;
+    std::string key_format     = CONST_EVENT_KEY_FORMAT;
+    std::string key_properties = CONST_EVENT_KEY_PROPERTIES;
 
     key_camera += std::to_string(camera_id);
     key_format += key_camera;
