@@ -24,6 +24,7 @@
 #include <chrono>
 #include <ctime>
 #include <errno.h>
+#include <fcntl.h>
 #include <filesystem>
 #include <json_utils.h>
 #include <nlohmann/json.hpp>
@@ -92,6 +93,51 @@ DeviceControl::DeviceControl()
     }
 }
 
+DeviceControl::~DeviceControl()
+{
+    PLOGI("started \n");
+
+    // stop the storage monitor first : its callback points back into this object
+    storageMonitor_.stopMonitor();
+
+    // stop the capture thread if still running
+    b_iscontinuous_capture_ = false;
+    {
+        std::lock_guard<std::mutex> lock(captureMutex_);
+        if (tidCapture.joinable())
+        {
+            try
+            {
+                tidCapture.join();
+            }
+            catch (const std::system_error &e)
+            {
+                PLOGE("Caught a system_error with code %d meaning %s", e.code().value(), e.what());
+            }
+        }
+    }
+
+    // stop the preview thread if still running
+    b_isstreamon_ = false;
+    if (tidPreview.joinable())
+    {
+        try
+        {
+            tidPreview.join();
+        }
+        catch (const std::system_error &e)
+        {
+            PLOGE("Caught a system_error with code %d meaning %s", e.code().value(), e.what());
+        }
+    }
+
+    // detach the memory listener before members are destroyed
+    if (pCameraSolution != nullptr)
+    {
+        pCameraSolution->setEventListener(nullptr);
+    }
+}
+
 /* If necessary, use this according to the layout below */
 /* Currently, don't use this */
 /* meta json
@@ -127,9 +173,10 @@ bool DeviceControl::updateMetaBuffer(const buffer_t &buffer, const json &videoMe
     std::string strMeta = jmeta.dump();
     PLOGD("meta string : %s", strMeta.c_str());
 
-    if (strMeta.size() > 4096 - 1)
+    if (strMeta.size() + 1 > buffer.length)
     {
-        PLOGE("meta size is larger than buffer size");
+        PLOGE("meta size(%zu) is larger than buffer length(%lu)", strMeta.size() + 1,
+              buffer.length);
         return false;
     }
 
@@ -214,6 +261,13 @@ bool DeviceControl::updateSolutionBuffer(const buffer_t &buffer)
     // }
 
     auto meta = pMemoryListener->getResult();
+
+    if (meta.size() + 1 > buffer.length)
+    {
+        PLOGE("solution result size(%zu) is larger than buffer length(%lu)", meta.size() + 1,
+              buffer.length);
+        return false;
+    }
 
     memcpy((char *)buffer.start, meta.c_str(), meta.size() + 1);
     return true;
@@ -301,10 +355,18 @@ DEVICE_RETURN_CODE_T DeviceControl::writeImageToFile(const void *p, int size, in
 
     PLOGD("path : %s\n", path.c_str());
 
-    FILE *fp;
-    if (NULL == (fp = fopen(path.c_str(), "w")))
+    int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0644);
+    if (fd < 0)
     {
-        PLOGE("path : fopen failed\n");
+        PLOGE("path : open failed, errno %d\n", errno);
+        return DEVICE_ERROR_CANNOT_WRITE;
+    }
+
+    FILE *fp = fdopen(fd, "w");
+    if (NULL == fp)
+    {
+        PLOGE("path : fdopen failed\n");
+        ::close(fd);
         return DEVICE_ERROR_CANNOT_WRITE;
     }
 
@@ -360,7 +422,8 @@ DEVICE_RETURN_CODE_T DeviceControl::saveShmemory(int ncount) const
         }
         if (read_index == write_index)
         {
-            PLOGE("same write_index=%d", write_index);
+            PLOGE("timed out waiting for a new frame, write_index=%d", write_index);
+            return DEVICE_ERROR_TIMEOUT;
         }
         read_index = (write_index - 1 + FRAME_COUNT) % FRAME_COUNT;
 
@@ -399,10 +462,18 @@ DEVICE_RETURN_CODE_T DeviceControl::writeImageToFile(const void *p, unsigned lon
 {
     auto capturePath = createCaptureFileName(cnt);
 
-    FILE *fp;
-    if (NULL == (fp = fopen(capturePath.c_str(), "w")))
+    int fd = ::open(capturePath.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0644);
+    if (fd < 0)
     {
-        PLOGE("capturePath : fopen failed");
+        PLOGE("capturePath : open failed, errno %d", errno);
+        return DEVICE_ERROR_CANNOT_WRITE;
+    }
+
+    FILE *fp = fdopen(fd, "w");
+    if (NULL == fp)
+    {
+        PLOGE("capturePath : fdopen failed");
+        ::close(fd);
         return DEVICE_ERROR_CANNOT_WRITE;
     }
 
@@ -460,7 +531,8 @@ DEVICE_RETURN_CODE_T DeviceControl::saveShmemory(int ncount,
         }
         if (read_index == write_index)
         {
-            PLOGE("same write_index=%d", write_index);
+            PLOGE("timed out waiting for a new frame, write_index=%d", write_index);
+            return DEVICE_ERROR_TIMEOUT;
         }
         read_index = (write_index - 1 + FRAME_COUNT) % FRAME_COUNT;
 
@@ -519,8 +591,6 @@ void DeviceControl::captureThread()
 
     pthread_setname_np(pthread_self(), "capture_thread");
 
-    b_iscontinuous_capture_ = true;
-
     saveShmemory();
 
     PLOGI("ended\n");
@@ -576,6 +646,13 @@ void DeviceControl::previewThread()
 
         PLOGD("buffer: start(%p) index(%zu) length(%lu)", buffer.start, buffer.index,
               buffer.length);
+
+        if (buffer.index >= static_cast<size_t>(FRAME_COUNT))
+        {
+            PLOGE("invalid buffer index(%zu) from HAL", buffer.index);
+            notifyDeviceFault_(EventType::EVENT_TYPE_PREVIEW_FAULT);
+            break;
+        }
 
         // shared memory index
         int shm_index = buffer.index;
@@ -652,6 +729,12 @@ DEVICE_RETURN_CODE_T DeviceControl::startPreview(LSHandle *sh, const char *subsk
 {
     PLOGI("started !\n");
 
+    if (b_isstreamon_)
+    {
+        PLOGW("stream is already on!");
+        return DEVICE_OK;
+    }
+
     sh_      = sh;
     subskey_ = subskey ? subskey : "";
 
@@ -705,12 +788,6 @@ DEVICE_RETURN_CODE_T DeviceControl::startPreview(LSHandle *sh, const char *subsk
         pCameraSolution->initialize(streamformat, shmemName, sh);
     }
 
-    if (b_isstreamon_)
-    {
-        PLOGW("stream is already on!");
-        return DEVICE_OK;
-    }
-
     // user pointer buffer set-up.
     shmDataBuffers = (buffer_t *)calloc(FRAME_COUNT, sizeof(buffer_t));
     if (!shmDataBuffers)
@@ -727,7 +804,7 @@ DEVICE_RETURN_CODE_T DeviceControl::startPreview(LSHandle *sh, const char *subsk
     std::vector<void *> dataList, metaList, extraList, solutionList;
     shmem_->getBufferList(&dataList, &metaList, &extraList, &solutionList);
     if (dataList.size() != FRAME_COUNT || metaList.size() != FRAME_COUNT ||
-        extraList.size() != FRAME_COUNT)
+        extraList.size() != FRAME_COUNT || solutionList.size() != FRAME_COUNT)
     {
         PLOGE("buffer size error!");
         closeShmemoryIfNeeded();
@@ -827,15 +904,8 @@ DEVICE_RETURN_CODE_T DeviceControl::stopPreview(bool forceComplete)
         }
     }
 
-    if (shmem_)
-    {
-        shmem_.reset();
-        shmBufferFd_ = -1;
-        shmSignalFdMap_.clear();
-    }
-
-    shmMetaBuffers_.clear();
-    shmExtraBuffers_.clear();
+    shmSignalFdMap_.clear();
+    closeShmemoryIfNeeded();
 
     return DEVICE_OK;
 }
@@ -899,7 +969,8 @@ DEVICE_RETURN_CODE_T DeviceControl::startCapture(CAMERA_FORMAT sformat,
     if (str_capturemode_ == cstr_continuous)
     {
         // create thread that will continuously capture images until stopcapture received
-        tidCapture = std::thread{[this]() { this->captureThread(); }};
+        b_iscontinuous_capture_ = true;
+        tidCapture              = std::thread{[this]() { this->captureThread(); }};
     }
     else
     {
@@ -917,14 +988,17 @@ DEVICE_RETURN_CODE_T DeviceControl::stopCapture()
     PLOGI("started !\n");
 
     // if capture thread is running, stop capture
-    if (b_iscontinuous_capture_)
+    bool expected = true;
+    if (!b_iscontinuous_capture_.compare_exchange_strong(expected, false))
+        return DEVICE_ERROR_DEVICE_IS_ALREADY_STOPPED;
+
+    storageMonitor_.stopMonitor();
+
+    std::lock_guard<std::mutex> lock(captureMutex_);
+    if (tidCapture.joinable())
     {
-        b_iscontinuous_capture_ = false;
-        storageMonitor_.stopMonitor();
         tidCapture.join();
     }
-    else
-        return DEVICE_ERROR_DEVICE_IS_ALREADY_STOPPED;
 
     return DEVICE_OK;
 }
@@ -1339,6 +1413,7 @@ void DeviceControl::closeShmemoryIfNeeded()
 
     shmMetaBuffers_.clear();
     shmExtraBuffers_.clear();
+    shmSolutionBuffers_.clear();
 
     if (shmem_)
     {
