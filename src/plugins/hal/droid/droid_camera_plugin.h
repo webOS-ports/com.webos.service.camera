@@ -21,9 +21,12 @@
 #include "camera_hal_types_common.h"
 #include "plugin_interface.hpp"
 
+#include <chrono>
+#include <cstddef>
 #include <gst/gst.h>
 #include <mutex>
 #include <string>
+#include <vector>
 
 /*
  * Camera HAL plugin for Halium devices: the cameras sit behind the Android
@@ -62,8 +65,8 @@ public:
     static int deviceCount();
 
 private:
-    bool buildPipeline();
-    void logBusError(const char *context);
+    bool buildPipeline(std::chrono::steady_clock::time_point deadline);
+    void logBusError(GstElement *pipeline, const char *context);
     void teardownPipeline();
 
     int cameraDevice_;
@@ -78,6 +81,12 @@ private:
     buffer_t *buffers_;
     int nBuffers_;
     int nextBuffer_;
+    /* Capacity of each slot as it was at setBuffer time. The service reuses
+     * slot->length as the byte count of whatever frame last landed there, so
+     * clamping against the live field would shrink the writable size to the
+     * previous frame after the first getBuffer. */
+    std::vector<size_t> slotLengths_;
+    bool truncateWarned_;
     // serializes getBuffer against teardown: the service's preview thread
     // pulls frames while stopCapture may run from the LS2 thread
     std::mutex lock_;

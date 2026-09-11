@@ -20,20 +20,23 @@
 #include "camera_log.h"
 #include "plugin.hpp"
 
+#include <cerrno>
 #include <chrono>
+#include <climits>
+#include <cstdlib>
 #include <cstring>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <thread>
 
 static void ensureGstInit()
 {
-    static bool done = false;
-    if (!done)
-    {
-        gst_init(nullptr, nullptr);
-        done = true;
-    }
+    /* gst_init() has no internal guard, and this is reachable from the LS2
+     * handler thread and startCapture's build worker at the same time; a plain
+     * bool would let two threads initialize concurrently. */
+    static std::once_flag once;
+    std::call_once(once, []() { gst_init(nullptr, nullptr); });
 }
 
 /* Ask the GStreamer registry instead of probing a fixed path. gst-droid is not
@@ -84,7 +87,7 @@ int DroidCameraPlugin::deviceCount()
 
 DroidCameraPlugin::DroidCameraPlugin()
     : cameraDevice_(0), pipeline_(nullptr), appsink_(nullptr), streaming_(false),
-      buffers_(nullptr), nBuffers_(0), nextBuffer_(0)
+      buffers_(nullptr), nBuffers_(0), nextBuffer_(0), truncateWarned_(false)
 {
     std::memset(&format_, 0, sizeof(format_));
     format_.pixel_format  = CAMERA_PIXEL_FORMAT_NV21;
@@ -96,13 +99,37 @@ DroidCameraPlugin::DroidCameraPlugin()
 
 DroidCameraPlugin::~DroidCameraPlugin() { teardownPipeline(); }
 
+/* Device nodes are announced by the droid notifier as droid:<n>. Parse the
+ * suffix strictly: atoi silently turns a mangled node into camera 0, which
+ * would open the wrong sensor instead of failing the command. */
+static bool parseDroidDeviceNode(const std::string &devname, int &device)
+{
+    const auto pos = devname.rfind(':');
+    if (pos == std::string::npos || pos + 1 >= devname.size())
+        return false;
+
+    const char *suffix = devname.c_str() + pos + 1;
+    char *end          = nullptr;
+    errno              = 0;
+    const long v       = strtol(suffix, &end, 10);
+    if (errno != 0 || end == suffix || *end != '\0' || v < 0 || v > INT_MAX)
+        return false;
+
+    device = static_cast<int>(v);
+    return true;
+}
+
 int DroidCameraPlugin::openDevice(std::string devname, std::string payload)
 {
     PLOGI("devname: %s", devname.c_str());
 
-    /* device nodes are announced by the droid notifier as droid:<n> */
-    const auto pos = devname.rfind(':');
-    cameraDevice_  = (pos != std::string::npos) ? atoi(devname.c_str() + pos + 1) : 0;
+    int device = 0;
+    if (!parseDroidDeviceNode(devname, device))
+    {
+        PLOGE("not a droid device node: %s", devname.c_str());
+        return CAMERA_ERROR_UNKNOWN;
+    }
+    cameraDevice_ = device;
 
     if (!droidPluginAvailable())
     {
@@ -135,11 +162,26 @@ int DroidCameraPlugin::setFormat(const void *stream_format)
     format_.buffer_size =
         format_.stream_width * format_.stream_height * 3 / 2;
 
-    if (streaming_)
+    bool wasStreaming = false;
+    {
+        std::lock_guard<std::mutex> guard(lock_);
+        wasStreaming = streaming_;
+    }
+
+    if (wasStreaming)
     {
         teardownPipeline();
-        if (!buildPipeline())
+        /* This runs outside startCapture's retry loop, so the rebuild gets the
+         * whole 10 s budget to itself (see startCapture for where that number
+         * comes from). */
+        if (!buildPipeline(std::chrono::steady_clock::now() + std::chrono::seconds(10)))
             return CAMERA_ERROR_UNKNOWN;
+
+        /* teardownPipeline cleared streaming_; without turning it back on the
+         * rebuilt pipeline is live but every later getBuffer refuses to pull
+         * from it and the preview dies. */
+        std::lock_guard<std::mutex> guard(lock_);
+        streaming_ = true;
     }
     return CAMERA_ERROR_NONE;
 }
@@ -164,13 +206,54 @@ int DroidCameraPlugin::setBuffer(int num_buffer, int io_mode, void **usrbufs)
 
     if (!buffers_ || nBuffers_ == 0)
     {
+        slotLengths_.clear();
         PLOGE("no user buffers supplied by the service (io_mode %d)", io_mode);
         return CAMERA_ERROR_UNKNOWN;
     }
+
+    /* Snapshot each slot's capacity now: after every frame the service
+     * overwrites slot->length with that frame's byte count, so the live field
+     * stops describing how much the slot can hold once the first frame lands. */
+    slotLengths_.assign(static_cast<size_t>(nBuffers_), 0);
+    for (int i = 0; i < nBuffers_; i++)
+        slotLengths_[i] = buffers_[i].length;
+    truncateWarned_ = false;
+
     return CAMERA_ERROR_NONE;
 }
 
-bool DroidCameraPlugin::buildPipeline()
+/* The NULL transition is the dangerous one. When droidcamsrc is wedged
+ * part-way through bringing the vendor camera up, gst_element_set_state()
+ * does not come back, and because this runs in the short-lived
+ * com.webos.service.camera2.hal child that hangs the whole process. The
+ * Android camera client is then never released - logcat shows the
+ * "Camera N: Opened" with no matching disconnect - and every later attempt,
+ * including a plain gst-launch, fails until the device is rebooted.
+ *
+ * So bound it. If the pipeline will not stop, abandon it and let the
+ * process exit: exiting drops the binder connection, which is what actually
+ * makes CameraService release the camera. Leaking a pipeline in a process
+ * that is about to die costs nothing; hanging it costs a reboot. */
+static void stopPipelineBounded(GstElement *pipeline)
+{
+    auto finished = std::make_shared<std::promise<void>>();
+    std::future<void> stopped = finished->get_future();
+
+    std::thread(
+        [pipeline, finished]()
+        {
+            gst_element_set_state(pipeline, GST_STATE_NULL);
+            gst_object_unref(pipeline);
+            finished->set_value();
+        })
+        .detach();
+
+    if (stopped.wait_for(std::chrono::seconds(3)) != std::future_status::ready)
+        PLOGE("droid pipeline did not reach NULL within 3s; abandoning it so the "
+              "process can exit and release the camera");
+}
+
+bool DroidCameraPlugin::buildPipeline(std::chrono::steady_clock::time_point deadline)
 {
     gchar *desc = g_strdup_printf(
         "droidcamsrc name=droidcam camera-device=%d "
@@ -181,11 +264,15 @@ bool DroidCameraPlugin::buildPipeline()
         "appsink name=sink emit-signals=false sync=false max-buffers=2 drop=true",
         cameraDevice_, format_.stream_width, format_.stream_height);
 
-    GError *error = nullptr;
-    pipeline_     = gst_parse_launch(desc, &error);
+    /* Build into locals and publish only a fully working pipeline at the end:
+     * getBuffer and teardownPipeline read pipeline_/appsink_ under lock_, so
+     * writing the members here while the state change is still in flight would
+     * hand them a half-built pipeline. */
+    GError *error        = nullptr;
+    GstElement *pipeline = gst_parse_launch(desc, &error);
     g_free(desc);
 
-    if (!pipeline_)
+    if (!pipeline)
     {
         PLOGE("pipeline: %s", error ? error->message : "unknown");
         g_clear_error(&error);
@@ -193,9 +280,19 @@ bool DroidCameraPlugin::buildPipeline()
     }
     g_clear_error(&error);
 
-    appsink_ = gst_bin_get_by_name(GST_BIN(pipeline_), "sink");
+    GstElement *sink = gst_bin_get_by_name(GST_BIN(pipeline), "sink");
+    if (!sink)
+    {
+        /* gst_parse_launch can succeed while still not producing the element
+         * we asked for by name; without the appsink there is nothing to pull
+         * frames from, so a "working" pipeline here would only fail later in
+         * getBuffer with no hint why. */
+        PLOGE("pipeline has no appsink named \"sink\"");
+        stopPipelineBounded(pipeline);
+        return false;
+    }
 
-    GstStateChangeReturn ret = gst_element_set_state(pipeline_, GST_STATE_PLAYING);
+    GstStateChangeReturn ret = gst_element_set_state(pipeline, GST_STATE_PLAYING);
 
     /* A failed state change on its own tells us nothing: the reason lives on
      * the pipeline bus, and droidcamsrc puts a real message there (no such
@@ -203,8 +300,9 @@ bool DroidCameraPlugin::buildPipeline()
      * evidence is "cannot start droid pipeline", which is not enough to act on. */
     if (ret == GST_STATE_CHANGE_FAILURE)
     {
-        logBusError("set_state(PLAYING) failed");
-        teardownPipeline();
+        logBusError(pipeline, "set_state(PLAYING) failed");
+        gst_object_unref(sink);
+        stopPipelineBounded(pipeline);
         return false;
     }
 
@@ -215,33 +313,46 @@ bool DroidCameraPlugin::buildPipeline()
     if (ret == GST_STATE_CHANGE_ASYNC)
     {
         GstState state = GST_STATE_NULL;
-        /* Must fit inside the camera service's own budget: CameraHalProxy
-         * gives startPreview COMMAND_TIMEOUT_LONG (12 s), and the shared-memory
-         * setup and setBuffer have already spent part of it. Long enough to
-         * catch a source that cannot open its device - droidcamsrc prerolls in
-         * a couple of seconds when it works - while leaving the service room
-         * to answer its own caller. */
-        ret = gst_element_get_state(pipeline_, &state, nullptr, 5 * GST_SECOND);
+        /* Wait only as long as the caller's deadline allows: the deadline is
+         * derived from the camera service's own budget (CameraHalProxy gives
+         * startPreview COMMAND_TIMEOUT_LONG, 12 s, part of which the
+         * shared-memory setup and setBuffer have already spent), and a retrying
+         * caller has already burned part of it on earlier attempts. droidcamsrc
+         * prerolls in a couple of seconds when it works, so whatever is left is
+         * enough to catch a source that cannot open its device. */
+        const auto remaining = deadline - std::chrono::steady_clock::now();
+        GstClockTime wait    = 0;
+        if (remaining > std::chrono::steady_clock::duration::zero())
+            wait = static_cast<GstClockTime>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(remaining).count());
+        ret = gst_element_get_state(pipeline, &state, nullptr, wait);
         if (ret != GST_STATE_CHANGE_SUCCESS || state != GST_STATE_PLAYING)
         {
-            logBusError("pipeline did not reach PLAYING");
-            teardownPipeline();
+            logBusError(pipeline, "pipeline did not reach PLAYING");
+            gst_object_unref(sink);
+            stopPipelineBounded(pipeline);
             return false;
         }
+    }
+
+    {
+        std::lock_guard<std::mutex> guard(lock_);
+        pipeline_ = pipeline;
+        appsink_  = sink;
     }
     return true;
 }
 
 /* Drain whatever the pipeline bus is holding and log it. Called only on the
  * failure paths, so the ordinary case stays quiet. */
-void DroidCameraPlugin::logBusError(const char *context)
+void DroidCameraPlugin::logBusError(GstElement *pipeline, const char *context)
 {
     PLOGE("%s", context);
 
-    if (!pipeline_)
+    if (!pipeline)
         return;
 
-    GstBus *bus = gst_element_get_bus(pipeline_);
+    GstBus *bus = gst_element_get_bus(pipeline);
     if (!bus)
         return;
 
@@ -286,33 +397,7 @@ void DroidCameraPlugin::teardownPipeline()
     if (!pipeline)
         return;
 
-    /* The NULL transition is the dangerous one. When droidcamsrc is wedged
-     * part-way through bringing the vendor camera up, gst_element_set_state()
-     * does not come back, and because this runs in the short-lived
-     * com.webos.service.camera2.hal child that hangs the whole process. The
-     * Android camera client is then never released - logcat shows the
-     * "Camera N: Opened" with no matching disconnect - and every later attempt,
-     * including a plain gst-launch, fails until the device is rebooted.
-     *
-     * So bound it. If the pipeline will not stop, abandon it and let the
-     * process exit: exiting drops the binder connection, which is what actually
-     * makes CameraService release the camera. Leaking a pipeline in a process
-     * that is about to die costs nothing; hanging it costs a reboot. */
-    auto finished = std::make_shared<std::promise<void>>();
-    std::future<void> stopped = finished->get_future();
-
-    std::thread(
-        [pipeline, finished]()
-        {
-            gst_element_set_state(pipeline, GST_STATE_NULL);
-            gst_object_unref(pipeline);
-            finished->set_value();
-        })
-        .detach();
-
-    if (stopped.wait_for(std::chrono::seconds(3)) != std::future_status::ready)
-        PLOGE("droid pipeline did not reach NULL within 3s; abandoning it so the "
-              "process can exit and release the camera");
+    stopPipelineBounded(pipeline);
 }
 
 int DroidCameraPlugin::startCapture()
@@ -325,10 +410,20 @@ int DroidCameraPlugin::startCapture()
      * same error on this hardware and still reaches PLAYING, because it keeps
      * going instead of tearing down. We were giving up on the first attempt.
      *
-     * Retry the whole build a couple of times. Each failed attempt costs about
-     * a second, and the budget has to stay inside the camera service's
-     * COMMAND_TIMEOUT_LONG (12 s) for startPreview. */
+     * Retry the whole build a couple of times, but against one shared
+     * deadline: the camera service gives startPreview COMMAND_TIMEOUT_LONG
+     * (12 s) and per-attempt costs stack up - the PLAYING wait, a teardown
+     * that may burn its full 3 s bound, the pause between attempts - so fixed
+     * per-attempt timeouts can overshoot it. Budget 10 s here to leave the
+     * service room to answer its own caller, hand each attempt whatever is
+     * left, and stop retrying once another attempt cannot fit. */
     constexpr int kAttempts = 3;
+    constexpr auto kRetryPause = std::chrono::milliseconds(300);
+    /* droidcamsrc prerolls in a couple of seconds when it works; an attempt
+     * with less time than this left cannot succeed and only delays the error. */
+    constexpr auto kMinAttemptBudget = std::chrono::seconds(2);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+
     for (int attempt = 1; attempt <= kAttempts; attempt++)
     {
         /* Build on a thread of our own rather than on the luna-service2
@@ -339,7 +434,8 @@ int DroidCameraPlugin::startCapture()
          * calling context is the most visible thing that differs. */
         bool built = false;
         {
-            std::thread worker([this, &built]() { built = buildPipeline(); });
+            std::thread worker([this, deadline, &built]()
+                               { built = buildPipeline(deadline); });
             worker.join();
         }
 
@@ -347,13 +443,20 @@ int DroidCameraPlugin::startCapture()
         {
             if (attempt > 1)
                 PLOGI("droid pipeline started on attempt %d", attempt);
+            std::lock_guard<std::mutex> guard(lock_);
             streaming_ = true;
             return CAMERA_ERROR_NONE;
         }
 
         PLOGW("droid pipeline attempt %d/%d failed", attempt, kAttempts);
-        if (attempt < kAttempts)
-            g_usleep(300 * 1000);
+        if (attempt == kAttempts)
+            break;
+        if (std::chrono::steady_clock::now() + kRetryPause + kMinAttemptBudget >= deadline)
+        {
+            PLOGW("no budget left for attempt %d/%d, giving up", attempt + 1, kAttempts);
+            break;
+        }
+        g_usleep(300 * 1000);
     }
 
     return CAMERA_ERROR_UNKNOWN;
@@ -379,7 +482,13 @@ int DroidCameraPlugin::getBuffer(void *outbuf)
         return CAMERA_ERROR_UNKNOWN;
 
     buffer_t *slot = &buffers_[nextBuffer_];
-    if (!slot->start || slot->length == 0)
+    /* Capacity comes from the setBuffer-time snapshot, not slot->length: the
+     * service overwrites that field with each frame's byte count, so from the
+     * second frame on it describes the previous frame, not the slot. */
+    const size_t capacity = (static_cast<size_t>(nextBuffer_) < slotLengths_.size())
+                                ? slotLengths_[nextBuffer_]
+                                : 0;
+    if (!slot->start || capacity == 0)
     {
         PLOGE("user buffer %d is not usable", nextBuffer_);
         return CAMERA_ERROR_UNKNOWN;
@@ -402,8 +511,19 @@ int DroidCameraPlugin::getBuffer(void *outbuf)
     {
         /* never write past the shared-memory slot the service allocated */
         gsize n = map.size;
-        if (n > slot->length)
-            n = slot->length;
+        if (n > capacity)
+        {
+            /* A frame that does not fit means the negotiated caps and the
+             * shm layout disagree; the consumer gets a truncated frame, so
+             * say so - once, this repeats every frame. */
+            if (!truncateWarned_)
+            {
+                PLOGW("frame of %" G_GSIZE_FORMAT " bytes exceeds slot capacity "
+                      "%zu; truncating", map.size, capacity);
+                truncateWarned_ = true;
+            }
+            n = capacity;
+        }
         std::memcpy(slot->start, map.data, n);
 
         buf->start  = slot->start;
@@ -432,6 +552,7 @@ int DroidCameraPlugin::destroyBuffer()
     buffers_    = nullptr;
     nBuffers_   = 0;
     nextBuffer_ = 0;
+    slotLengths_.clear();
     return CAMERA_ERROR_NONE;
 }
 
@@ -450,8 +571,12 @@ int DroidCameraPlugin::getInfo(void *cam_info, std::string devicenode)
 {
     camera_device_info_t *info = static_cast<camera_device_info_t *>(cam_info);
 
-    const auto pos = devicenode.rfind(':');
-    const int dev  = (pos != std::string::npos) ? atoi(devicenode.c_str() + pos + 1) : 0;
+    int dev = 0;
+    if (!parseDroidDeviceNode(devicenode, dev))
+    {
+        PLOGE("not a droid device node: %s", devicenode.c_str());
+        return CAMERA_ERROR_UNKNOWN;
+    }
 
     info->str_devicename = (dev == 0) ? "Droid back camera" : "Droid front camera";
     info->str_vendorid   = "droid";
