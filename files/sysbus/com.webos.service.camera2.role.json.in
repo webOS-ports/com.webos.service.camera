@@ -13,7 +13,8 @@
             "outbound": [
                 "com.webos.service.pdm",
                 "com.webos.service.appcasting",
-                "com.webos.service.audio"
+                "com.webos.service.audio",
+                "com.webos.app.camera-*"
             ]
         },
         {
