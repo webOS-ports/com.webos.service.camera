@@ -22,6 +22,7 @@
 
 static inline int deSerialize(const char *strInput, const char *inputSchema, jvalue_ref &objJson)
 {
+    objJson            = NULL;
     jerror *error      = NULL;
     jschema_ref schema = jschema_create(j_cstr_to_buffer(inputSchema), &error);
 
@@ -37,6 +38,21 @@ static inline int deSerialize(const char *strInput, const char *inputSchema, jva
     if (error)
     {
         jerror_free(error);
+        if (objJson)
+        {
+            j_release(&objJson);
+            objJson = NULL;
+        }
+        return -1;
+    }
+
+    if (!jis_valid(objJson))
+    {
+        if (objJson)
+        {
+            j_release(&objJson);
+            objJson = NULL;
+        }
         return -1;
     }
 

@@ -57,29 +57,48 @@ void StorageMonitor::run()
 
 bool StorageMonitor::startMonitor()
 {
-    std::unique_lock<std::mutex> lock(cv_m);
+    {
+        std::unique_lock<std::mutex> lock(cv_m);
 
-    if (monitoring_)
-        return true;
+        if (monitoring_)
+            return true;
+    }
 
-    monitoring_ = true;
+    // reap a previous monitor thread that stopped itself
+    if (tidMonitor_.joinable())
+    {
+        tidMonitor_.join();
+    }
+
+    {
+        std::unique_lock<std::mutex> lock(cv_m);
+        monitoring_ = true;
+    }
     tidMonitor_ = std::thread{[this]() { this->run(); }};
-    tidMonitor_.detach();
     return true;
 }
 
 bool StorageMonitor::stopMonitor()
 {
-    std::unique_lock<std::mutex> lock(cv_m);
+    {
+        std::unique_lock<std::mutex> lock(cv_m);
 
-    if (!monitoring_)
-        return true;
+        monitoring_ = false;
+        cv.notify_all();
+    }
 
-    monitoring_ = false;
     if (tidMonitor_.joinable())
     {
+        if (tidMonitor_.get_id() == std::this_thread::get_id())
+        {
+            // called from the monitor thread itself (via callback); cannot join here.
+            // the thread will exit on its own and be reaped by startMonitor or the destructor.
+            PLOGI("stopMonitor requested from the monitor thread");
+            return true;
+        }
         tidMonitor_.join();
     }
+
     callback_      = nullptr;
     deviceControl_ = nullptr;
 
@@ -106,6 +125,12 @@ bool StorageMonitor::isEnoughSpaceAvailable(std::string path)
 
     unsigned long f_bavail = fiData.f_bavail;
     unsigned long f_bsize  = fiData.f_bsize;
+
+    if (f_blocks == 0 || f_frsize == 0)
+    {
+        PLOGE("invalid filesystem info! : %s", path.c_str());
+        return false;
+    }
 
     freeSpace = (f_bavail * 100 / f_blocks) * f_bsize / f_frsize;
 

@@ -77,7 +77,7 @@ void from_json(const json &j, VideoDevice &v)
 
     if (j.contains("subDeviceList") && j["subDeviceList"].is_array())
     {
-        for (auto jsub : j["subDeviceList"])
+        for (const auto &jsub : j["subDeviceList"])
         {
             if (jsub.contains("capabilities") && jsub["capabilities"] == ":capture:")
             {
@@ -96,7 +96,15 @@ void from_json(const json &j, VideoDevice &v)
 
 PDMClient::PDMClient() { PLOGI(""); }
 
-PDMClient::~PDMClient() { PLOGI(""); }
+PDMClient::~PDMClient()
+{
+    PLOGI("");
+    if (lunaClient_ && subscribeKey_ != 0UL)
+    {
+        lunaClient_->unsubscribe(subscribeKey_);
+        subscribeKey_ = 0UL;
+    }
+}
 
 void PDMClient::subscribeToClient(handlercb cb, void *mainLoop)
 {
@@ -166,6 +174,12 @@ bool PDMClient::registerToServiceCallback(const char *serviceName, bool connecte
 
 bool PDMClient::getDeviceListCallback(const char *message)
 {
+    if (message == nullptr)
+    {
+        PLOGE("message is null!");
+        return false;
+    }
+
     PLOGI("payload : %s", message);
 
     json jPayload = json::parse(message, nullptr, false);
@@ -198,7 +212,7 @@ bool PDMClient::getDeviceListCallback(const char *message)
         unsigned long subdeviceCount = device.subDeviceList.size();
         for (auto &subdevice : device.subDeviceList)
         {
-            if (subdevice->devPath.find("/dev/video") == std::string::npos)
+            if (subdevice->devPath.rfind("/dev/video", 0) != 0)
                 continue;
             DEVICE_LIST_T devInfo;
             devInfo               = device.devInfo;

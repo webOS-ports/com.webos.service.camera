@@ -16,6 +16,9 @@
 
 if(WEBOS_USES_GOOGLE_TEST)
     add_subdirectory(plugins/hal)
+    add_subdirectory(libs)
 endif()
 
 add_subdirectory(test-app)
+add_subdirectory(fuzz)
+add_subdirectory(stress)

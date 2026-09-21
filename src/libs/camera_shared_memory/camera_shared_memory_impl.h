@@ -17,12 +17,16 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <map>
 #include <mutex>
 #include <pthread.h>
 #include <string>
 #include <vector>
 
+// The header lives at the start of the shared segment and is written by the
+// creator and read by every peer, so its layout is cross-process ABI. Do not
+// reorder or resize fields.
 #pragma pack(push, 4)
 struct ShmHeader
 {
@@ -53,10 +57,12 @@ public:
     CameraSharedMemoryImpl();
     ~CameraSharedMemoryImpl();
 
-    int create(const std::string name, size_t dataSize, size_t metaSize, size_t extraSize,
+    int create(const std::string &name, size_t dataSize, size_t metaSize, size_t extraSize,
                size_t solutionSize, size_t bufferCount);
+    // Maps a segment received as an fd. The caller keeps ownership of the fd
+    // on failure; on success the fd is owned (and closed) by this object.
     bool open(int fd);
-    int open(const std::string name);
+    int open(const std::string &name);
     void close(void);
 
     bool incrementWriteIndex(void);
@@ -87,6 +93,10 @@ private:
     bool readData(unsigned char **ppData, size_t *pDataSize, unsigned char **ppMeta,
                   size_t *pMetaSize, unsigned char **ppExtra, size_t *pExtraSize,
                   unsigned char **ppSolution, size_t *pSolutionSize);
+    static bool validateGeometry(size_t dataSize, size_t metaSize, size_t extraSize,
+                                 size_t solutionSize, size_t bufferCount, size_t *pSectionSize,
+                                 size_t *pTotalSize);
+    void resetLocked(void);
 
 private:
     std::mutex m_;
@@ -98,6 +108,14 @@ private:
     ShmHeader *shmHeader_;
     std::vector<ShmBuffer> shmBuffers_;
 
-    uint64_t eventValue_{0};
+    // Geometry validated once at create()/open() time. All bounds checks use
+    // these copies: the header in the shared segment is writable by peer
+    // processes and must not be re-trusted after validation (double-fetch).
+    size_t bufferCount_{0};
+    size_t dataSize_{0};
+    size_t metaSize_{0};
+    size_t extraSize_{0};
+    size_t solutionSize_{0};
+
     std::map<std::string, int> signalFdMap_;
 };

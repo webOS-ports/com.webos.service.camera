@@ -26,6 +26,8 @@ class CameraHalService : public LS::Handle
 
     std::unique_ptr<DeviceControl> pDeviceControl;
 
+    bool respondNotReady(LSMessage &message);
+
 public:
     CameraHalService(const char *service_name);
 

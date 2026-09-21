@@ -60,7 +60,24 @@ bool VirtualDeviceManager::checkAppPriorityMap()
 
 int VirtualDeviceManager::getVirtualDeviceHandle(int devid)
 {
-    int virtual_devhandle = getRandomNumber();
+    int virtual_devhandle = n_invalid_id;
+    // draw a random handle until it is unique, valid and unused; bound the retries
+    for (int tries = 0; tries < 100; tries++)
+    {
+        int candidate = getRandomNumber();
+        if (candidate == 0 || candidate == -1)
+            continue;
+        if (virtualhandle_map_.find(candidate) == virtualhandle_map_.end())
+        {
+            virtual_devhandle = candidate;
+            break;
+        }
+    }
+    if (n_invalid_id == virtual_devhandle)
+    {
+        PLOGE("Failed to allocate a unique virtual device handle");
+        return n_invalid_id;
+    }
     DeviceStateMap obj_devstate;
     obj_devstate.ndeviceid_               = devid;
     obj_devstate.ecamstate_               = CameraDeviceState::CAM_DEVICE_STATE_OPEN;
@@ -121,6 +138,11 @@ DEVICE_RETURN_CODE_T VirtualDeviceManager::openDevice(int devid, int *devhandle)
 
     // get virtual device handle for device opened
     *devhandle = getVirtualDeviceHandle(devid);
+    if (n_invalid_id == *devhandle)
+    {
+        PLOGE("Failed to allocate virtual device handle");
+        return DEVICE_ERROR_CAN_NOT_OPEN;
+    }
 
     return ret;
 }
@@ -165,6 +187,11 @@ DEVICE_RETURN_CODE_T VirtualDeviceManager::open(int devid, int *devhandle, std::
     {
         // device is already opened, hence return virtual handle for device
         *devhandle = getVirtualDeviceHandle(devid);
+        if (n_invalid_id == *devhandle)
+        {
+            PLOGE("Failed to allocate virtual device handle");
+            return DEVICE_ERROR_CAN_NOT_OPEN;
+        }
         PLOGI("Device is already opened! Handle : %d \n", *devhandle);
         // add handle with priority to map
         handlepriority_map_.insert(std::make_pair(*devhandle, apppriority));
@@ -205,7 +232,13 @@ DEVICE_RETURN_CODE_T VirtualDeviceManager::close(int devhandle)
     }
 
     // if there are elements in the map, get device id for device handle
-    DeviceStateMap obj_devstate = virtualhandle_map_[devhandle];
+    auto handle_it = virtualhandle_map_.find(devhandle);
+    if (handle_it == virtualhandle_map_.end())
+    {
+        PLOGE("Handle %d not found\n", devhandle);
+        return DEVICE_ERROR_DEVICE_IS_ALREADY_CLOSED;
+    }
+    DeviceStateMap obj_devstate = handle_it->second;
     int deviceid                = obj_devstate.ndeviceid_;
     PLOGI("deviceid : %d \n", deviceid);
 
@@ -261,7 +294,13 @@ DEVICE_RETURN_CODE_T VirtualDeviceManager::startCamera(int devhandle, LSHandle *
     PLOGI("devhandle : %d \n", devhandle);
 
     // Get device id for virtual device handle
-    DeviceStateMap obj_devstate = virtualhandle_map_[devhandle];
+    auto handle_it = virtualhandle_map_.find(devhandle);
+    if (handle_it == virtualhandle_map_.end())
+    {
+        PLOGE("Handle %d not found\n", devhandle);
+        return DEVICE_ERROR_DEVICE_IS_NOT_OPENED;
+    }
+    DeviceStateMap obj_devstate = handle_it->second;
     int deviceid                = obj_devstate.ndeviceid_;
     PLOGI("deviceid : %d \n", deviceid);
 
@@ -343,7 +382,13 @@ DEVICE_RETURN_CODE_T VirtualDeviceManager::stopCamera(int devhandle, bool forceC
     PLOGI("devhandle : %d \n", devhandle);
 
     // Get device id for virtual device handle
-    DeviceStateMap obj_devstate = virtualhandle_map_[devhandle];
+    auto handle_it = virtualhandle_map_.find(devhandle);
+    if (handle_it == virtualhandle_map_.end())
+    {
+        PLOGE("Handle %d not found\n", devhandle);
+        return DEVICE_ERROR_DEVICE_IS_NOT_OPENED;
+    }
+    DeviceStateMap obj_devstate = handle_it->second;
     int deviceid                = obj_devstate.ndeviceid_;
     PLOGI("deviceid : %d \n", deviceid);
 
@@ -450,9 +495,13 @@ DEVICE_RETURN_CODE_T VirtualDeviceManager::startPreview(int devhandle, std::stri
     }
 
     // update state of device to preview
-    DeviceStateMap obj_devstate   = virtualhandle_map_[devhandle];
-    obj_devstate.ecamstate_       = CameraDeviceState::CAM_DEVICE_STATE_PREVIEW;
-    virtualhandle_map_[devhandle] = obj_devstate;
+    auto handle_it = virtualhandle_map_.find(devhandle);
+    if (handle_it == virtualhandle_map_.end())
+    {
+        PLOGE("Handle %d not found\n", devhandle);
+        return DEVICE_ERROR_DEVICE_IS_NOT_OPENED;
+    }
+    handle_it->second.ecamstate_ = CameraDeviceState::CAM_DEVICE_STATE_PREVIEW;
 
     PLOGI("ok");
     return DEVICE_OK;
@@ -517,7 +566,13 @@ DEVICE_RETURN_CODE_T VirtualDeviceManager::singleCapture(int devhandle, CAMERA_F
     PLOGI("devhandle : %d ncount : %d \n", devhandle, ncount);
 
     // get device id for virtual device handle
-    DeviceStateMap obj_devstate = virtualhandle_map_[devhandle];
+    auto handle_it = virtualhandle_map_.find(devhandle);
+    if (handle_it == virtualhandle_map_.end())
+    {
+        PLOGE("Handle %d not found\n", devhandle);
+        return DEVICE_ERROR_DEVICE_IS_NOT_OPENED;
+    }
+    DeviceStateMap obj_devstate = handle_it->second;
     int deviceid                = obj_devstate.ndeviceid_;
     PLOGI("deviceid : %d \n", deviceid);
 
@@ -544,7 +599,13 @@ DEVICE_RETURN_CODE_T VirtualDeviceManager::continuousCapture(int devhandle, CAME
     PLOGI("devhandle : %d\n", devhandle);
 
     // get device id for virtual device handle
-    DeviceStateMap obj_devstate = virtualhandle_map_[devhandle];
+    auto handle_it = virtualhandle_map_.find(devhandle);
+    if (handle_it == virtualhandle_map_.end())
+    {
+        PLOGE("Handle %d not found\n", devhandle);
+        return DEVICE_ERROR_DEVICE_IS_NOT_OPENED;
+    }
+    DeviceStateMap obj_devstate = handle_it->second;
     int deviceid                = obj_devstate.ndeviceid_;
     PLOGI("deviceid : %d \n", deviceid);
 
@@ -598,7 +659,13 @@ DEVICE_RETURN_CODE_T VirtualDeviceManager::stopCapture(int devhandle, bool reque
     PLOGI("devhandle : %d\n", devhandle);
 
     // get device id for virtual device handle
-    DeviceStateMap obj_devstate = virtualhandle_map_[devhandle];
+    auto handle_it = virtualhandle_map_.find(devhandle);
+    if (handle_it == virtualhandle_map_.end())
+    {
+        PLOGE("Handle %d not found\n", devhandle);
+        return DEVICE_ERROR_DEVICE_IS_NOT_OPENED;
+    }
+    DeviceStateMap obj_devstate = handle_it->second;
     int deviceid                = obj_devstate.ndeviceid_;
     PLOGI("deviceid : %d \n", deviceid);
 
@@ -653,7 +720,13 @@ DEVICE_RETURN_CODE_T VirtualDeviceManager::capture(int devhandle, int ncount,
     PLOGI("devhandle : %d ncount : %d \n", devhandle, ncount);
 
     // get device id for virtual device handle
-    DeviceStateMap obj_devstate = virtualhandle_map_[devhandle];
+    auto handle_it = virtualhandle_map_.find(devhandle);
+    if (handle_it == virtualhandle_map_.end())
+    {
+        PLOGE("Handle %d not found\n", devhandle);
+        return DEVICE_ERROR_DEVICE_IS_NOT_OPENED;
+    }
+    DeviceStateMap obj_devstate = handle_it->second;
     int deviceid                = obj_devstate.ndeviceid_;
     PLOGI("deviceid : %d \n", deviceid);
 
@@ -682,7 +755,13 @@ DEVICE_RETURN_CODE_T VirtualDeviceManager::getProperty(int devhandle,
     PLOGI("devhandle : %d\n", devhandle);
 
     // get device id for virtual device handle
-    DeviceStateMap obj_devstate = virtualhandle_map_[devhandle];
+    auto handle_it = virtualhandle_map_.find(devhandle);
+    if (handle_it == virtualhandle_map_.end())
+    {
+        PLOGE("Handle %d not found\n", devhandle);
+        return DEVICE_ERROR_DEVICE_IS_NOT_OPENED;
+    }
+    DeviceStateMap obj_devstate = handle_it->second;
     int deviceid                = obj_devstate.ndeviceid_;
     PLOGI("deviceid : %d \n", deviceid);
 
@@ -704,7 +783,13 @@ DEVICE_RETURN_CODE_T VirtualDeviceManager::setProperty(int devhandle, CAMERA_PRO
     PLOGI("devhandle : %d\n", devhandle);
 
     // get device id for virtual device handle
-    DeviceStateMap obj_devstate = virtualhandle_map_[devhandle];
+    auto handle_it = virtualhandle_map_.find(devhandle);
+    if (handle_it == virtualhandle_map_.end())
+    {
+        PLOGE("Handle %d not found\n", devhandle);
+        return DEVICE_ERROR_DEVICE_IS_NOT_OPENED;
+    }
+    DeviceStateMap obj_devstate = handle_it->second;
     int deviceid                = obj_devstate.ndeviceid_;
     PLOGI("deviceid : %d \n", deviceid);
 
@@ -740,7 +825,13 @@ DEVICE_RETURN_CODE_T VirtualDeviceManager::setFormat(int devhandle, CAMERA_FORMA
     PLOGI("devhandle : %d\n", devhandle);
 
     // get device id for virtual device handle
-    DeviceStateMap obj_devstate = virtualhandle_map_[devhandle];
+    auto handle_it = virtualhandle_map_.find(devhandle);
+    if (handle_it == virtualhandle_map_.end())
+    {
+        PLOGE("Handle %d not found\n", devhandle);
+        return DEVICE_ERROR_DEVICE_IS_NOT_OPENED;
+    }
+    DeviceStateMap obj_devstate = handle_it->second;
     int deviceid                = obj_devstate.ndeviceid_;
     PLOGI("deviceid : %d \n", deviceid);
 
@@ -781,7 +872,13 @@ DEVICE_RETURN_CODE_T VirtualDeviceManager::getFormat(int devhandle, CAMERA_FORMA
     PLOGI("devhandle : %d\n", devhandle);
 
     // get device id for virtual device handle
-    DeviceStateMap obj_devstate = virtualhandle_map_[devhandle];
+    auto handle_it = virtualhandle_map_.find(devhandle);
+    if (handle_it == virtualhandle_map_.end())
+    {
+        PLOGE("Handle %d not found\n", devhandle);
+        return DEVICE_ERROR_DEVICE_IS_NOT_OPENED;
+    }
+    DeviceStateMap obj_devstate = handle_it->second;
     int deviceid                = obj_devstate.ndeviceid_;
     PLOGI("deviceid : %d \n", deviceid);
 
@@ -802,7 +899,13 @@ DEVICE_RETURN_CODE_T VirtualDeviceManager::getFd(int devhandle, const std::strin
 {
     PLOGI("devhandle : %d\n", devhandle);
 
-    DeviceStateMap obj_devstate = virtualhandle_map_[devhandle];
+    auto handle_it = virtualhandle_map_.find(devhandle);
+    if (handle_it == virtualhandle_map_.end())
+    {
+        PLOGE("Handle %d not found\n", devhandle);
+        return DEVICE_ERROR_INVALID_STATE;
+    }
+    DeviceStateMap obj_devstate = handle_it->second;
 
     if (obj_devstate.ecamstate_ >= CameraDeviceState::CAM_DEVICE_STATE_OPEN)
     {
@@ -826,7 +929,13 @@ VirtualDeviceManager::getSupportedCameraSolutionInfo(int devhandle,
                                                      std::vector<std::string> &solutionsInfo)
 {
     // get device id for virtual device handle
-    DeviceStateMap obj_devstate = virtualhandle_map_[devhandle];
+    auto handle_it = virtualhandle_map_.find(devhandle);
+    if (handle_it == virtualhandle_map_.end())
+    {
+        PLOGE("Handle %d not found\n", devhandle);
+        return DEVICE_ERROR_DEVICE_IS_NOT_OPENED;
+    }
+    DeviceStateMap obj_devstate = handle_it->second;
     int deviceid                = obj_devstate.ndeviceid_;
     PLOGI("deviceid : %d \n", deviceid);
 
@@ -848,7 +957,13 @@ VirtualDeviceManager::getEnabledCameraSolutionInfo(int devhandle,
                                                    std::vector<std::string> &solutionsInfo)
 {
     // get device id for virtual device handle
-    DeviceStateMap obj_devstate = virtualhandle_map_[devhandle];
+    auto handle_it = virtualhandle_map_.find(devhandle);
+    if (handle_it == virtualhandle_map_.end())
+    {
+        PLOGE("Handle %d not found\n", devhandle);
+        return DEVICE_ERROR_DEVICE_IS_NOT_OPENED;
+    }
+    DeviceStateMap obj_devstate = handle_it->second;
     int deviceid                = obj_devstate.ndeviceid_;
     PLOGI("deviceid : %d \n", deviceid);
 
@@ -871,7 +986,13 @@ VirtualDeviceManager::enableCameraSolution(int devhandle, const std::vector<std:
     PLOGI("VirtualDeviceManager enableCameraSolutionInfo E\n");
 
     // get device id for virtual device handle
-    DeviceStateMap obj_devstate = virtualhandle_map_[devhandle];
+    auto handle_it = virtualhandle_map_.find(devhandle);
+    if (handle_it == virtualhandle_map_.end())
+    {
+        PLOGE("Handle %d not found\n", devhandle);
+        return DEVICE_ERROR_DEVICE_IS_NOT_OPENED;
+    }
+    DeviceStateMap obj_devstate = handle_it->second;
     int deviceid                = obj_devstate.ndeviceid_;
     PLOGI("deviceid : %d \n", deviceid);
 
@@ -906,7 +1027,13 @@ VirtualDeviceManager::disableCameraSolution(int devhandle,
     PLOGI("VirtualDeviceManager disableCameraSolutionInfo E\n");
 
     // get device id for virtual device handle
-    DeviceStateMap obj_devstate = virtualhandle_map_[devhandle];
+    auto handle_it = virtualhandle_map_.find(devhandle);
+    if (handle_it == virtualhandle_map_.end())
+    {
+        PLOGE("Handle %d not found\n", devhandle);
+        return DEVICE_ERROR_DEVICE_IS_NOT_OPENED;
+    }
+    DeviceStateMap obj_devstate = handle_it->second;
     int deviceid                = obj_devstate.ndeviceid_;
     PLOGI("deviceid : %d \n", deviceid);
 
@@ -971,13 +1098,10 @@ bool VirtualDeviceManager::stopPreviewDisplay(int handle)
 
 CameraDeviceState VirtualDeviceManager::getDeviceState(int devhandle)
 {
-    for (auto it = virtualhandle_map_.begin(); it != virtualhandle_map_.end(); ++it)
+    auto handle_it = virtualhandle_map_.find(devhandle);
+    if (handle_it != virtualhandle_map_.end())
     {
-        if (devhandle == it->first)
-        {
-            DeviceStateMap obj_devstate = virtualhandle_map_[devhandle];
-            return obj_devstate.ecamstate_;
-        }
+        return handle_it->second.ecamstate_;
     }
     return CameraDeviceState::CAM_DEVICE_STATE_CLOSE;
 }

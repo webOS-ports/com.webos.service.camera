@@ -13,6 +13,7 @@
 #define LOG_TAG "LunaClient"
 #include "luna_client.h"
 #include "camera_utils_log.h"
+#include <atomic>
 #include <glib.h>
 #include <ios>
 #include <system_error>
@@ -94,13 +95,42 @@ LunaClient::LunaClient(const char *serviceName, GMainContext *ctx)
 
 LunaClient::~LunaClient(void)
 {
-    if (!needUnregister)
-        return;
-
     try
     {
-        AutoLSError error = {};
-        LSUnregister(pHandle_, &error);
+        if (pHandle_ != nullptr)
+        {
+            // Cancel live subscriptions so their callbacks can no longer reference
+            // the HandlerWrapper objects owned by handlers_.
+            for (auto &handler : handlers_)
+            {
+                AutoLSError error = {};
+                if (!LSCallCancel(pHandle_, handler.first, &error))
+                {
+                    PLOGE("LunaClient ERROR: LSCallCancel failed for token %ld", handler.first);
+                }
+            }
+
+            // Cancel server status registrations so their callbacks can no longer
+            // reference the RegisterHandlerWrapper objects owned by registerHandlers_.
+            for (auto &registerHandler : registerHandlers_)
+            {
+                if (registerHandler.second && registerHandler.second->cookie)
+                {
+                    AutoLSError error = {};
+                    if (!LSCancelServerStatus(pHandle_, registerHandler.second->cookie, &error))
+                    {
+                        PLOGE("LunaClient ERROR: LSCancelServerStatus failed for %s",
+                              registerHandler.first.c_str());
+                    }
+                }
+            }
+
+            if (needUnregister)
+            {
+                AutoLSError error = {};
+                LSUnregister(pHandle_, &error);
+            }
+        }
     }
     catch (const std::exception &e)
     {
@@ -119,9 +149,9 @@ bool LunaClient::callSync(const char *uri, const char *param, std::string *resul
     struct Ctx
     {
         Ctx(std::string *pstrResult, int *fd) : pstrResult_(pstrResult), pFd_(fd) {}
-        bool bRet_{false};
+        std::atomic<bool> bRet_{false};
         std::string *pstrResult_{nullptr};
-        bool bDone_{false};
+        std::atomic<bool> bDone_{false};
         int *pFd_{nullptr};
     } ctx(result, fd);
 
@@ -143,12 +173,19 @@ bool LunaClient::callSync(const char *uri, const char *param, std::string *resul
             // 4. getFd
             if (pCtx->pFd_)
             {
-                int fd      = LSPayloadGetFd(LSMessageAccessPayload(m));
-                *pCtx->pFd_ = dup(fd);
-                PLOGI("fd(%d) dup(%d)", fd, *pCtx->pFd_);
+                int fd = LSPayloadGetFd(LSMessageAccessPayload(m));
+                if (fd >= 0)
+                {
+                    *pCtx->pFd_ = dup(fd);
+                    PLOGI("fd(%d) dup(%d)", fd, *pCtx->pFd_);
+                }
+                else
+                {
+                    PLOGE("invalid fd(%d)", fd);
+                }
             }
             PLOGD("[%p] reply\n", g_thread_self());
-            return pCtx->bRet_;
+            return pCtx->bRet_.load();
         },
         &ctx, &tok, &error);
 
@@ -160,6 +197,15 @@ bool LunaClient::callSync(const char *uri, const char *param, std::string *resul
     if (ret == true)
     {
         ret = LSCallSetTimeout(pHandle_, tok, timeout, nullptr);
+        if (ret != true)
+        {
+            // The call is still pending but will never be waited on below.
+            // Cancel it so the reply callback cannot touch the stack context
+            // after this function returns.
+            PLOGE("[%p] LunaClient ERROR: LSCallSetTimeout failed", g_thread_self());
+            AutoLSError cancelError = {};
+            LSCallCancel(pHandle_, tok, &cancelError);
+        }
     }
 
     if (ret == true)
@@ -168,8 +214,9 @@ bool LunaClient::callSync(const char *uri, const char *param, std::string *resul
         {
             while (!ctx.bDone_)
             {
-                if (FALSE == g_main_context_iteration(pContext_, FALSE))
-                    continue;
+                // Block until a source is dispatched; LSCallSetTimeout above
+                // guarantees the reply callback fires eventually.
+                g_main_context_iteration(pContext_, TRUE);
             }
         }
         else
@@ -180,10 +227,19 @@ bool LunaClient::callSync(const char *uri, const char *param, std::string *resul
                 g_usleep(1000);
                 cnt++;
             }
+            if (!ctx.bDone_)
+            {
+                // Timed out waiting; cancel the pending call so the reply
+                // callback cannot touch the stack context after this
+                // function returns.
+                PLOGE("[%p] LunaClient ERROR: callSync timed out, token %ld", g_thread_self(), tok);
+                AutoLSError cancelError = {};
+                LSCallCancel(pHandle_, tok, &cancelError);
+            }
         }
     }
 
-    PLOGD("[%p] ret=%d, bRet_=%d", g_thread_self(), ret, ctx.bRet_);
+    PLOGD("[%p] ret=%d, bRet_=%d", g_thread_self(), ret, ctx.bRet_.load());
     return ret && ctx.bRet_;
 }
 
@@ -202,7 +258,9 @@ bool LunaClient::callAsync(const char *uri, const char *param, Handler handler, 
         +[](LSHandle *h, LSMessage *m, void *d)
         {
             HandlerWrapper *wrapper = (HandlerWrapper *)d;
-            wrapper->callback(LSMessageGetPayload(m), wrapper->data);
+            const char *payload     = LSMessageGetPayload(m);
+            if (payload)
+                wrapper->callback(payload, wrapper->data);
             delete wrapper;
             return true;
         },
@@ -228,6 +286,23 @@ bool LunaClient::registerToService(const char *serviceName, RegisterHandler hand
     wrapper->data                   = data;
 
     PLOGD("serviceName=%s", serviceName);
+
+    // If a registration for this service already exists, cancel it before
+    // replacing its wrapper so the old callback can no longer be invoked.
+    auto it = registerHandlers_.find(serviceName);
+    if (it != registerHandlers_.end())
+    {
+        if (it->second && it->second->cookie)
+        {
+            AutoLSError cancelError = {};
+            if (!LSCancelServerStatus(pHandle_, it->second->cookie, &cancelError))
+            {
+                PLOGE("LunaClient ERROR: LSCancelServerStatus failed for %s", serviceName);
+            }
+        }
+        registerHandlers_.erase(it);
+    }
+
     ret = LSRegisterServerStatusEx(
         pHandle_, serviceName,
         +[](LSHandle *h, const char *s, bool b, void *d)
@@ -236,7 +311,7 @@ bool LunaClient::registerToService(const char *serviceName, RegisterHandler hand
             wrapper->callback(s, b, wrapper->data);
             return true;
         },
-        (void *)wrapper, NULL, &error);
+        (void *)wrapper, &wrapper->cookie, &error);
 
     if (!ret)
     {
@@ -265,8 +340,11 @@ bool LunaClient::subscribe(const char *uri, const char *param, unsigned long *su
     PLOGD("uri=%s, param=%s, appId=%s", uri, param, appId);
     auto cb = +[](LSHandle *h, LSMessage *m, void *d)
     {
+        const char *payload = LSMessageGetPayload(m);
+        if (!payload)
+            return true;
         HandlerWrapper *wrapper = (HandlerWrapper *)d;
-        wrapper->callback(LSMessageGetPayload(m), wrapper->data);
+        wrapper->callback(payload, wrapper->data);
         return true;
     };
 

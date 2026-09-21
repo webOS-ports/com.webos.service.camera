@@ -20,6 +20,7 @@
 #include "camera_types.h"
 #include <fstream>
 #include <map>
+#include <mutex>
 #include <string.h>
 
 const std::string error_outof_range = "error code is out of range";
@@ -129,6 +130,10 @@ std::map<int, std::string> g_query_ctrl_string = {
 
 int getRandomNumber()
 {
+    // protect the static state so concurrent callers cannot race
+    static std::mutex random_mutex;
+    std::lock_guard<std::mutex> lock(random_mutex);
+
     static unsigned int random_value = 0;
     std::ifstream urandom("/dev/urandom", std::ios::in | std::ios::binary);
     if (urandom)
