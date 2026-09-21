@@ -5,7 +5,6 @@
 #include "process.h"
 #include <luna-service2/lunaservice.hpp>
 #include <pbnjson.hpp>
-#include <sstream>
 
 #define LOAD_PAYLOAD_HEAD "{\"appId\":\"com.webos.app.mediaevents-test\", \"windowId\":\""
 
@@ -39,41 +38,37 @@ PreviewDisplayControl::~PreviewDisplayControl()
 
 bool PreviewDisplayControl::isValidWindowId(std::string windowId)
 {
-    std::stringstream strStream;
     int num      = 0;
-    int digit    = -1;
-    size_t end   = std::string::npos;
-    size_t begin = std::string::npos;
+    size_t begin = window_id_str.length();
+    size_t end   = windowId.length();
 
-    begin = windowId.find(window_id_str);
-    if (begin != 0)
+    // the full string must be "_Window_Id_" followed by one or more digits
+    if (windowId.compare(0, window_id_str.length(), window_id_str) != 0)
     {
         PLOGI("Invalid windowId value");
         return false;
     }
 
-    begin = window_id_str.length();
-    end   = windowId.length();
+    if (end <= begin)
+    {
+        PLOGI("Invalid windowId value");
+        return false;
+    }
 
     for (size_t index = begin; index < end; index++)
     {
-        if (isdigit(static_cast<unsigned char>(windowId[index])))
+        if (!isdigit(static_cast<unsigned char>(windowId[index])))
         {
-            strStream << windowId[index];
-            strStream >> digit;
-            if (!strStream)
-            {
-                PLOGI("Error: conversion from string to number failed");
-                return false;
-            }
-            strStream.clear();
-            if (num > INT_MAX / 10)
-            {
-                PLOGI("Potential overflow detected");
-                return false;
-            }
-            num = digit + num * 10;
+            PLOGI("Invalid windowId value");
+            return false;
         }
+        int digit = windowId[index] - '0';
+        if (num > INT_MAX / 10 || (num == INT_MAX / 10 && digit > INT_MAX % 10))
+        {
+            PLOGI("Potential overflow detected");
+            return false;
+        }
+        num = digit + num * 10;
     }
     if (num > 0)
     {
@@ -150,6 +145,12 @@ bool PreviewDisplayControl::call(std::string uri, std::string payload,
 {
     done_ = 0;
 
+    if (!sh_ || !loop_)
+    {
+        PLOGE("LS connection is not available");
+        return false;
+    }
+
     LSError lserror;
     LSErrorInit(&lserror);
 
@@ -164,10 +165,18 @@ bool PreviewDisplayControl::call(std::string uri, std::string payload,
 
     LSErrorFree(&lserror);
 
+    // bounded wait (100us per iteration) so a dead pipeline cannot hang the service
+    const int max_iterations = 100000; // ~10 seconds
+    int iterations           = 0;
     while (!done_)
     {
         g_main_context_iteration(context, false);
         usleep(100);
+        if (++iterations >= max_iterations)
+        {
+            PLOGE("timed out waiting for reply to %s", uri.c_str());
+            return false;
+        }
     }
     return true;
 }
@@ -194,6 +203,12 @@ bool PreviewDisplayControl::start(std::string camera_id, std::string windowId,
     if (!isValidWindowId(windowId))
     {
         PLOGE("Invalid windowId value");
+        return false;
+    }
+
+    if (!sh_ || !loop_)
+    {
+        PLOGE("LS connection is not available");
         return false;
     }
 

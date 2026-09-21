@@ -24,6 +24,7 @@
 #include "camera_shared_memory_ex.h"
 #include "camera_types.h"
 #include "storage_monitor.h"
+#include <atomic>
 #include <condition_variable>
 #include <plugin_factory.hpp>
 #include <string>
@@ -58,8 +59,8 @@ private:
     std::string createCaptureFileName(int) const;
     void closeShmemoryIfNeeded();
 
-    bool b_iscontinuous_capture_;
-    bool b_isstreamon_;
+    std::atomic<bool> b_iscontinuous_capture_;
+    std::atomic<bool> b_isstreamon_;
 
     IHal *p_cam_hal;
 
@@ -67,6 +68,7 @@ private:
     std::thread tidPreview;
     std::thread tidCapture;
     std::mutex tMutex;
+    std::mutex captureMutex_;
     std::string strdevicenode_;
     std::string str_imagepath_;
     std::string str_capturemode_;
@@ -100,6 +102,7 @@ private:
 
 public:
     DeviceControl();
+    ~DeviceControl();
     DEVICE_RETURN_CODE_T open(std::string, int, std::string);
     DEVICE_RETURN_CODE_T close();
     DEVICE_RETURN_CODE_T startPreview(LSHandle *, const char *);

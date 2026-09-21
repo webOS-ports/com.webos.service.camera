@@ -34,6 +34,7 @@ class FaceDetectionAIF : public CameraSolutionAsync
         uint32_t outChannels_{0};
         uint32_t outStride_{0};
         uint8_t *pImage_{nullptr};
+        size_t allocSize_{0};
         RawImage(void) {}
         ~RawImage(void)
         {
@@ -42,8 +43,17 @@ class FaceDetectionAIF : public CameraSolutionAsync
         }
         void prepareImage(void)
         {
-            if (!pImage_ && outHeight_ && outWidth_ && outChannels_)
-                pImage_ = new uint8_t[outWidth_ * outHeight_ * outChannels_];
+            size_t required = static_cast<size_t>(outWidth_) * outHeight_ * outChannels_;
+            if (required == 0)
+                return;
+            if (!pImage_ || allocSize_ != required)
+            {
+                delete[] pImage_;
+                pImage_    = nullptr;
+                allocSize_ = 0;
+                pImage_    = new uint8_t[required];
+                allocSize_ = required;
+            }
         }
         uint8_t *getLine(uint32_t lineNumber)
         {

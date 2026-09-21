@@ -28,6 +28,7 @@
 #include "json_schema.h"
 #include "notifier.h"
 #include "whitelist_checker.h"
+#include <cctype>
 #include <pbnjson.hpp>
 #include <signal.h>
 #include <string>
@@ -101,6 +102,14 @@ int CameraService::getId(const std::string &cameraid)
 
     if (!extractedNumbers.empty())
     {
+        // the id suffix must consist of digits only
+        for (const char &c : extractedNumbers)
+        {
+            if (!isdigit(static_cast<unsigned char>(c)))
+            {
+                return num;
+            }
+        }
         try
         {
             num = std::stoi(extractedNumbers);
@@ -423,6 +432,7 @@ bool CameraService::startCapture(LSMessage &message)
     auto *payload = LSMessageGetPayload(&message);
     PLOGI("payload %s", payload);
     DEVICE_RETURN_CODE_T err_id = DEVICE_OK;
+    const int max_capture       = 30;
 
     StartCaptureMethod obj_startcapture;
     obj_startcapture.getStartCaptureObject(payload, startCaptureSchema);
@@ -442,6 +452,11 @@ bool CameraService::startCapture(LSMessage &message)
                  obj_startcapture.getnImage() < 1)
         {
             err_id = DEVICE_ERROR_JSON_PARSING;
+        }
+        else if (obj_startcapture.strGetCaptureMode() == cstr_burst &&
+                 obj_startcapture.getnImage() > max_capture)
+        {
+            err_id = DEVICE_ERROR_OUT_OF_PARAM_RANGE;
         }
         else
         {
@@ -1104,27 +1119,40 @@ bool CameraService::getSolutions(LSMessage &message)
         {
             ndevhandle = CommandManager::getInstance().getCameraHandle(ncamId);
             PLOGI("devhandel by camera(%d) is (%d)\n", ncamId, ndevhandle);
+            // check the client owns the device resolved from the camera id
+            if (n_invalid_id != ndevhandle)
+                err_id = validateClient(&message, ndevhandle);
         }
-        PLOGI("DEVICE_OK\n");
-        obj_getsolutions.setMethodReply(CONST_PARAM_VALUE_TRUE, (int)err_id,
-                                        getErrorString(err_id));
 
-        err_id = CommandManager::getInstance().getSupportedCameraSolutionInfo(
-            ndevhandle, supportedSolutionList);
-        if (DEVICE_OK != err_id)
+        if (err_id != DEVICE_OK)
         {
-            PLOGI("error happens on getting supported solution list by err_id(%d)\n", err_id);
+            PLOGI("err_id(%d)\n", err_id);
             obj_getsolutions.setMethodReply(CONST_PARAM_VALUE_FALSE, (int)err_id,
                                             getErrorString(err_id));
         }
-
-        err_id = CommandManager::getInstance().getEnabledCameraSolutionInfo(ndevhandle,
-                                                                            enabledSolutionList);
-        if (DEVICE_OK != err_id)
+        else
         {
-            PLOGI("error happens on getting enabled solution list by err_id(%d)\n", err_id);
-            obj_getsolutions.setMethodReply(CONST_PARAM_VALUE_FALSE, (int)err_id,
+            PLOGI("DEVICE_OK\n");
+            obj_getsolutions.setMethodReply(CONST_PARAM_VALUE_TRUE, (int)err_id,
                                             getErrorString(err_id));
+
+            err_id = CommandManager::getInstance().getSupportedCameraSolutionInfo(
+                ndevhandle, supportedSolutionList);
+            if (DEVICE_OK != err_id)
+            {
+                PLOGI("error happens on getting supported solution list by err_id(%d)\n", err_id);
+                obj_getsolutions.setMethodReply(CONST_PARAM_VALUE_FALSE, (int)err_id,
+                                                getErrorString(err_id));
+            }
+
+            err_id = CommandManager::getInstance().getEnabledCameraSolutionInfo(
+                ndevhandle, enabledSolutionList);
+            if (DEVICE_OK != err_id)
+            {
+                PLOGI("error happens on getting enabled solution list by err_id(%d)\n", err_id);
+                obj_getsolutions.setMethodReply(CONST_PARAM_VALUE_FALSE, (int)err_id,
+                                                getErrorString(err_id));
+            }
         }
     }
 
@@ -1194,90 +1222,102 @@ bool CameraService::setSolutions(LSMessage &message)
             {
                 ndevhandle = CommandManager::getInstance().getCameraHandle(ncamId);
                 PLOGI("devhandel by camera(%d) is (%d)\n", ncamId, ndevhandle);
+                // check the client owns the device resolved from the camera id
+                if (n_invalid_id != ndevhandle)
+                    err_id = validateClient(&message, ndevhandle);
             }
 
-            // check if the requested solution parameter is valid or not. If not valid at least one
-            // of them, this method didn't do anything
-            std::vector<std::string> supportedSolutionList;
-            unsigned int candidateSolutionCnt = 0;
-            err_id = CommandManager::getInstance().getSupportedCameraSolutionInfo(
-                ndevhandle, supportedSolutionList);
-
-            std::vector<std::string> str_solutions = obj_setSolutions.getEnableSolutionList();
-
-            for (auto &s : str_solutions)
+            if (err_id != DEVICE_OK)
             {
-                for (auto &i : supportedSolutionList)
-                {
-                    if (s == i)
-                    {
-                        if (candidateSolutionCnt < UINT_MAX)
-                        {
-                            candidateSolutionCnt++;
-                        }
-                        PLOGI("candidate enabled solutionName %s", s.c_str());
-                    }
-                }
-            }
-
-            // check if the parameters from client are all valid by comparing candidateSolutionCnt
-            // number and parameters number.
-            if (str_solutions.size() != candidateSolutionCnt)
-            {
-                PLOGE("%zd invalid parameter existed\n",
-                      str_solutions.size() - candidateSolutionCnt);
-                err_id = DEVICE_ERROR_WRONG_PARAM;
-                obj_setSolutions.setMethodReply(CONST_PARAM_VALUE_FALSE, (int)err_id,
-                                                getErrorString(err_id));
-            }
-
-            str_solutions        = obj_setSolutions.getDisableSolutionList();
-            candidateSolutionCnt = 0;
-            for (auto &s : str_solutions)
-            {
-                for (auto &i : supportedSolutionList)
-                {
-                    if (s == i)
-                    {
-                        if (candidateSolutionCnt < UINT_MAX)
-                        {
-                            candidateSolutionCnt++;
-                        }
-                        PLOGI("candidate enabled solutionName %s", s.c_str());
-                    }
-                }
-            }
-
-            // check if the parameters from client are all valid by comparing candidateSolutionCnt
-            // number and parameters number.
-            if (str_solutions.size() != candidateSolutionCnt)
-            {
-                PLOGE("%zd invalid parameter existed\n",
-                      str_solutions.size() - candidateSolutionCnt);
-                err_id = DEVICE_ERROR_WRONG_PARAM;
-                obj_setSolutions.setMethodReply(CONST_PARAM_VALUE_FALSE, (int)err_id,
-                                                getErrorString(err_id));
-            }
-
-            if (DEVICE_OK == err_id)
-            {
-                err_id = CommandManager::getInstance().enableCameraSolution(
-                    ndevhandle, obj_setSolutions.getEnableSolutionList());
-                err_id = CommandManager::getInstance().disableCameraSolution(
-                    ndevhandle, obj_setSolutions.getDisableSolutionList());
-            }
-
-            if (DEVICE_OK != err_id)
-            {
-                PLOGI("DEVICE_NOT_OK err_id(%d)\n", err_id);
+                PLOGI("err_id(%d)\n", err_id);
                 obj_setSolutions.setMethodReply(CONST_PARAM_VALUE_FALSE, (int)err_id,
                                                 getErrorString(err_id));
             }
             else
             {
-                PLOGI("DEVICE_OK\n");
-                obj_setSolutions.setMethodReply(CONST_PARAM_VALUE_TRUE, (int)err_id,
-                                                getErrorString(err_id));
+                // check if the requested solution parameter is valid or not. If not valid at least
+                // one of them, this method didn't do anything
+                std::vector<std::string> supportedSolutionList;
+                unsigned int candidateSolutionCnt = 0;
+                err_id = CommandManager::getInstance().getSupportedCameraSolutionInfo(
+                    ndevhandle, supportedSolutionList);
+
+                std::vector<std::string> str_solutions = obj_setSolutions.getEnableSolutionList();
+
+                for (auto &s : str_solutions)
+                {
+                    for (auto &i : supportedSolutionList)
+                    {
+                        if (s == i)
+                        {
+                            if (candidateSolutionCnt < UINT_MAX)
+                            {
+                                candidateSolutionCnt++;
+                            }
+                            PLOGI("candidate enabled solutionName %s", s.c_str());
+                        }
+                    }
+                }
+
+                // check if the parameters from client are all valid by comparing
+                // candidateSolutionCnt number and parameters number.
+                if (str_solutions.size() != candidateSolutionCnt)
+                {
+                    PLOGE("%zd invalid parameter existed\n",
+                          str_solutions.size() - candidateSolutionCnt);
+                    err_id = DEVICE_ERROR_WRONG_PARAM;
+                    obj_setSolutions.setMethodReply(CONST_PARAM_VALUE_FALSE, (int)err_id,
+                                                    getErrorString(err_id));
+                }
+
+                str_solutions        = obj_setSolutions.getDisableSolutionList();
+                candidateSolutionCnt = 0;
+                for (auto &s : str_solutions)
+                {
+                    for (auto &i : supportedSolutionList)
+                    {
+                        if (s == i)
+                        {
+                            if (candidateSolutionCnt < UINT_MAX)
+                            {
+                                candidateSolutionCnt++;
+                            }
+                            PLOGI("candidate enabled solutionName %s", s.c_str());
+                        }
+                    }
+                }
+
+                // check if the parameters from client are all valid by comparing
+                // candidateSolutionCnt number and parameters number.
+                if (str_solutions.size() != candidateSolutionCnt)
+                {
+                    PLOGE("%zd invalid parameter existed\n",
+                          str_solutions.size() - candidateSolutionCnt);
+                    err_id = DEVICE_ERROR_WRONG_PARAM;
+                    obj_setSolutions.setMethodReply(CONST_PARAM_VALUE_FALSE, (int)err_id,
+                                                    getErrorString(err_id));
+                }
+
+                if (DEVICE_OK == err_id)
+                {
+                    err_id = CommandManager::getInstance().enableCameraSolution(
+                        ndevhandle, obj_setSolutions.getEnableSolutionList());
+                    err_id = CommandManager::getInstance().disableCameraSolution(
+                        ndevhandle, obj_setSolutions.getDisableSolutionList());
+                }
+
+                if (DEVICE_OK != err_id)
+                {
+                    PLOGI("DEVICE_NOT_OK err_id(%d)\n", err_id);
+                    obj_setSolutions.setMethodReply(CONST_PARAM_VALUE_FALSE, (int)err_id,
+                                                    getErrorString(err_id));
+                }
+                else
+                {
+                    PLOGI("DEVICE_OK\n");
+                    obj_setSolutions.setMethodReply(CONST_PARAM_VALUE_TRUE, (int)err_id,
+                                                    getErrorString(err_id));
+                }
             }
         }
     }
@@ -1326,7 +1366,12 @@ bool CameraService::getFormat(LSMessage &message)
         if (n_invalid_id != ndevhandle)
         {
             CAMERA_FORMAT output_format;
-            err_id = CommandManager::getInstance().getFormat(ndevhandle, &output_format);
+            // check the client owns the device resolved from the camera id
+            err_id = validateClient(&message, ndevhandle);
+            if (DEVICE_OK == err_id)
+            {
+                err_id = CommandManager::getInstance().getFormat(ndevhandle, &output_format);
+            }
 
             if (DEVICE_OK != err_id)
             {
@@ -1393,6 +1438,16 @@ int main(int argc, char *argv[])
 
 extern "C" void signal_handler_service_crash(int sig)
 {
+    if (sig == SIGSEGV || sig == SIGBUS || sig == SIGFPE || sig == SIGILL || sig == SIGABRT)
+    {
+        // Fatal synchronous signals : logging and cleanup are not
+        // async-signal-safe, so restore the default action and re-raise
+        // the signal to terminate immediately and get restarted.
+        signal(sig, SIG_DFL);
+        raise(sig);
+        return;
+    }
+
     PLOGI("signal(%d) received !!\n", sig);
 
     CommandManager::getInstance().handleCrash();

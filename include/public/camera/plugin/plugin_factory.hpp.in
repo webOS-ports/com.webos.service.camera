@@ -205,7 +205,7 @@ public:
         {
             char *error{nullptr};
             if ((error = dlerror()) != nullptr)
-                std::cout << "dlopen() failed: " << dlerror() << std::endl;
+                std::cout << "dlopen() failed: " << error << std::endl;
             return nullptr;
         }
 
@@ -214,7 +214,7 @@ public:
         {
             char *error{nullptr};
             if ((error = dlerror()) != nullptr)
-                std::cout << "dlsym() failed @1: " << dlerror() << std::endl;
+                std::cout << "dlsym() failed @1: " << error << std::endl;
 
             dlclose(handle);
             return nullptr;
@@ -222,7 +222,22 @@ public:
 
         // TODO : To keep the plugin instance any where
         std::unique_ptr<IPlugin> pPlugin(plugin_init());
+        if (!pPlugin)
+        {
+            std::cout << "plugin_init() returned null" << std::endl;
+            dlclose(handle);
+            return nullptr;
+        }
+
         auto pFeature = pPlugin->createFeature(szFeatureName);
+        if (pFeature == nullptr)
+        {
+            // A null unique_ptr never invokes its deleter, so close the
+            // library handle explicitly here.
+            std::cout << "createFeature() returned null: " << szFeatureName << std::endl;
+            dlclose(handle);
+            return nullptr;
+        }
 
         return IFeaturePtr(reinterpret_cast<IFeature *>(pFeature),
                            [handle](IFeature *p)

@@ -14,7 +14,8 @@
                 "com.webos.service.pdm",
                 "com.webos.service.appcasting",
                 "com.webos.service.audio",
-                "com.webos.app.camera-*"
+                "com.webos.app.camera-*",
+                "com.webos.service.faceunlock"
             ]
         },
         {

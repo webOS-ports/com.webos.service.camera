@@ -5,13 +5,13 @@
 #include <string>
 #include <vector>
 
-inline const char *basename(const char *path)
+inline const char *pi_basename(const char *path)
 {
     const char *cp = strrchr(path, '/');
     return (cp ? cp + 1 : path);
 }
 
-#define __FILENAME__ (basename(__FILE__))
+#define __FILENAME__ (pi_basename(__FILE__))
 
 /**
  * IFeature:

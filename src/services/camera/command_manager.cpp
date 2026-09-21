@@ -121,8 +121,9 @@ DEVICE_RETURN_CODE_T CommandManager::close(int devhandle)
     {
         // send request to close the device
         DEVICE_RETURN_CODE_T ret = ptr->close(devhandle);
-        if (DEVICE_OK == ret)
+        if (DEVICE_OK == ret || DEVICE_ERROR_DEVICE_IS_ALREADY_CLOSED == ret)
         {
+            // also drop the stale entry when the device was already closed
             removeVirtualDevMgrObj(devhandle);
         }
         return ret;

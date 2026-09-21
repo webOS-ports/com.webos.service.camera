@@ -33,6 +33,7 @@ public:
     {
         RegisterHandler callback;
         void *data;
+        void *cookie{nullptr};
     };
 
     LunaClient(void);

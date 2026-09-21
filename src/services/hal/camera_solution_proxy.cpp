@@ -47,8 +47,15 @@ static bool cameraSolutionServiceCb(const char *msg, void *data)
     if (client->pEvent_)
     {
         jvalue_ref jsonFaceInfo = jdom_create(j_cstr_to_buffer(msg), jschema_all(), NULL);
-        (client->pEvent_.load())
-            ->onDone(jvalue_stringify(jsonFaceInfo)); // Send face info to DeviceController
+        const char *strFaceInfo = jvalue_stringify(jsonFaceInfo);
+        if (strFaceInfo)
+        {
+            (client->pEvent_.load())->onDone(strFaceInfo); // Send face info to DeviceController
+        }
+        else
+        {
+            PLOGE("jvalue_stringify failed");
+        }
         j_release(&jsonFaceInfo);
     }
 
@@ -209,11 +216,20 @@ bool CameraSolutionProxy::startProcess()
         PLOGE("Caught a system_error with code %d meaning %s", e.code().value(), e.what());
     }
 
-    while (!g_main_loop_is_running(loop_))
+    if (loopThread_ != nullptr)
     {
-    }
+        int timeout = 1000; // 1ms * 1000
+        while (!g_main_loop_is_running(loop_) && timeout--)
+        {
+            g_usleep(1000);
+        }
+        if (!g_main_loop_is_running(loop_))
+        {
+            PLOGE("main loop is not running");
+        }
 
-    pthread_setname_np(loopThread_->native_handle(), "solproxy_luna");
+        pthread_setname_np(loopThread_->native_handle(), "solproxy_luna");
+    }
 
     std::string service_name = cstr_uricamearhal + guid;
     luna_client              = std::make_unique<LunaClient>(service_name.c_str(), c);
@@ -226,8 +242,11 @@ bool CameraSolutionProxy::stopProcess()
 {
     PLOGI("");
 
-    g_main_loop_quit(loop_);
-    if (loopThread_->joinable())
+    if (loop_ != nullptr)
+    {
+        g_main_loop_quit(loop_);
+    }
+    if (loopThread_ != nullptr && loopThread_->joinable())
     {
         try
         {
@@ -238,7 +257,12 @@ bool CameraSolutionProxy::stopProcess()
             PLOGE("Caught a system_error with code %d meaning %s", e.code().value(), e.what());
         }
     }
-    g_main_loop_unref(loop_);
+    loopThread_.reset();
+    if (loop_ != nullptr)
+    {
+        g_main_loop_unref(loop_);
+        loop_ = nullptr;
+    }
 
     process_.reset();
 
@@ -363,7 +387,7 @@ bool CameraSolutionProxy::luna_call_sync(const char *func, const std::string &pa
     if (fd)
         PLOGI("fd %d", *fd);
 
-    json j = json::parse(resp);
+    json j = json::parse(resp, nullptr, false);
     if (j.is_discarded())
     {
         PLOGE("resp parsing error!");
@@ -391,11 +415,21 @@ void CameraSolutionProxy::run()
         }
         if (checkAlive())
         {
+            bool hasJob      = false;
+            bool enableValue = false;
             {
                 std::lock_guard<std::mutex> lg(mtxJob_);
-                processing(queueJob_.front());
+                if (!queueJob_.empty())
+                {
+                    hasJob      = true;
+                    enableValue = (queueJob_.front() != 0);
+                }
             }
-            popJob();
+            if (hasJob)
+            {
+                processing(enableValue);
+                popJob();
+            }
         }
     }
 
@@ -450,7 +484,10 @@ void CameraSolutionProxy::stopThread()
 
 void CameraSolutionProxy::notify(void)
 {
-    job_ready = true;
+    {
+        std::lock_guard<std::mutex> lock(m_);
+        job_ready = true;
+    }
     cv_.notify_all();
 }
 

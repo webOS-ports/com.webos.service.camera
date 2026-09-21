@@ -59,9 +59,16 @@ bool CameraSolutionService::create(LSMessage &message)
         {
             err_code = SOLLUTION_NAME_IS_EMPTY;
         }
+        else if (pFeature_ || pSolution_)
+        {
+            PLOGE("solution already created");
+            err_code = FAIL_TO_CREATE_SOLUTION;
+        }
         else
         {
-            pFeature_ = pluginFactory_.createFeature(solutionName.c_str());
+            // pSolution_ points into pFeature_ : never let it outlive the feature
+            pSolution_ = nullptr;
+            pFeature_  = pluginFactory_.createFeature(solutionName.c_str());
             if (pFeature_)
             {
                 void *pInterface = nullptr;
@@ -106,7 +113,7 @@ bool CameraSolutionService::create(LSMessage &message)
 
 bool CameraSolutionService::init(LSMessage &message)
 {
-    bool ret = true;
+    bool ret = false;
     stream_format_t streamFormat_{CAMERA_PIXEL_FORMAT_JPEG, 0, 0, 0, 0};
     std::string shmName;
     jvalue_ref json_outobj = jobject_create();
@@ -151,9 +158,20 @@ bool CameraSolutionService::init(LSMessage &message)
     }
 
     if (pSolution_)
+    {
         pSolution_->initialize(&streamFormat_, shmName, this->get());
+        ret = true;
+    }
 
     jobject_put(json_outobj, J_CSTR_TO_JVAL(CONST_PARAM_NAME_RETURNVALUE), jboolean_create(ret));
+    if (ret == false)
+    {
+        ErrorCode err_code = FAIL_TO_INIT;
+        jobject_put(json_outobj, J_CSTR_TO_JVAL(CONST_PARAM_NAME_ERROR_CODE),
+                    jnumber_create_i32(static_cast<int32_t>(err_code)));
+        jobject_put(json_outobj, J_CSTR_TO_JVAL(CONST_PARAM_NAME_ERROR_TEXT),
+                    jstring_create(ErrorManager::GetErrorText(err_code).c_str()));
+    }
 
     LS::Message request(&message);
     request.respond(jvalue_stringify(json_outobj));
