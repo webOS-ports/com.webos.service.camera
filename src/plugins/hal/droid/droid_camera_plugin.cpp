@@ -153,10 +153,17 @@ int DroidCameraPlugin::setFormat(const void *stream_format)
     PLOGI("requested %ux%u@%d fmt %d", in->stream_width, in->stream_height,
           in->stream_fps, in->pixel_format);
 
-    /* Raw preview from droidcamsrc is NV21; the service's consumers get the
-     * effective format back from getFormat. */
-    format_               = *in;
-    format_.pixel_format  = CAMERA_PIXEL_FORMAT_NV21;
+    /* Raw preview from droidcamsrc is NV21 and nothing else, and getInfo says
+     * so. A request for another layout would otherwise be answered with NV21
+     * frames carrying the wrong name, which the client then misreads, so
+     * refuse it. */
+    if (in->pixel_format != CAMERA_PIXEL_FORMAT_NV21)
+    {
+        PLOGE("only NV21 is supported, not pixel format %d", in->pixel_format);
+        return CAMERA_ERROR_SET_FORMAT;
+    }
+
+    format_ = *in;
     if (format_.stream_fps <= 0)
         format_.stream_fps = 30;
     format_.buffer_size =
@@ -584,9 +591,11 @@ int DroidCameraPlugin::getInfo(void *cam_info, std::string devicenode)
     info->n_devicetype   = DEVICE_TYPE_CAMERA;
     info->b_builtin      = 1;
     info->stResolution.clear();
+    /* droidcamsrc hands out NV21; advertising it as YUV (packed YUYV) made
+     * every client misread the frames. */
     info->stResolution.emplace_back(
         std::vector<std::string>{"1920,1080,30", "1280,720,30", "640,480,30"},
-        CAMERA_FORMAT_YUV);
+        CAMERA_FORMAT_NV21);
     return CAMERA_ERROR_NONE;
 }
 
