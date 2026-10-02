@@ -139,6 +139,7 @@ const int extra_buffer = 1024;
 const std::string cstr_empty           = "";
 const std::string cstr_invaliddeviceid = "-1";
 const std::string cstr_yuvformat       = "YUV";
+const std::string cstr_nv21format      = "NV21";
 const std::string cstr_h264esformat    = "H264ES";
 const std::string cstr_jpegformat      = "JPEG";
 const std::string cstr_primary         = "primary";

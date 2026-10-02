@@ -98,6 +98,7 @@ std::map<EventType, std::string> g_event_string = {
 std::map<camera_format_t, std::string> g_format_string = {
     {CAMERA_FORMAT_UNDEFINED, "Unsupported format"},
     {CAMERA_FORMAT_YUV, "YUV"},
+    {CAMERA_FORMAT_NV21, "NV21"},
     {CAMERA_FORMAT_H264ES, "H264ES"},
     {CAMERA_FORMAT_JPEG, "JPEG"}};
 
@@ -168,6 +169,9 @@ void getFormatString(int nFormat, char *pFormats)
         case CAMERA_FORMAT_YUV:
             strncat(pFormats, "YUV|", strlen("YUV|") + 1);
             break;
+        case CAMERA_FORMAT_NV21:
+            strncat(pFormats, "NV21|", strlen("NV21|") + 1);
+            break;
         case CAMERA_FORMAT_H264ES:
             strncat(pFormats, "H264ES|", strlen("H264ES|") + 1);
             break;
@@ -218,6 +222,8 @@ void convertFormatToCode(std::string format, camera_format_t *pformatcode)
 
     if (format == cstr_yuvformat)
         *pformatcode = CAMERA_FORMAT_YUV;
+    else if (format == cstr_nv21format)
+        *pformatcode = CAMERA_FORMAT_NV21;
     else if (format == cstr_h264esformat)
         *pformatcode = CAMERA_FORMAT_H264ES;
     else if (format == cstr_jpegformat)
@@ -261,6 +267,9 @@ std::string getResolutionString(camera_format_t eformat)
     {
     case CAMERA_FORMAT_YUV:
         str_resolution = cstr_yuvformat;
+        break;
+    case CAMERA_FORMAT_NV21:
+        str_resolution = cstr_nv21format;
         break;
     case CAMERA_FORMAT_JPEG:
         str_resolution = cstr_jpegformat;

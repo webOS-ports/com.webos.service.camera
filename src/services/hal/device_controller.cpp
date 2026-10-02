@@ -577,6 +577,10 @@ camera_pixel_format_t DeviceControl::getPixelFormat(camera_format_t eformat)
     {
         return CAMERA_PIXEL_FORMAT_YUYV;
     }
+    else if (eformat == CAMERA_FORMAT_NV21)
+    {
+        return CAMERA_PIXEL_FORMAT_NV21;
+    }
     else if (eformat == CAMERA_FORMAT_JPEG)
     {
         return CAMERA_PIXEL_FORMAT_JPEG;
@@ -1254,6 +1258,10 @@ camera_format_t DeviceControl::getCameraFormat(camera_pixel_format_t eformat)
     else if (eformat == CAMERA_PIXEL_FORMAT_YUYV)
     {
         return CAMERA_FORMAT_YUV;
+    }
+    else if (eformat == CAMERA_PIXEL_FORMAT_NV21)
+    {
+        return CAMERA_FORMAT_NV21;
     }
     else if (eformat == CAMERA_PIXEL_FORMAT_JPEG)
     {

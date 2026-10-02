@@ -65,12 +65,20 @@ typedef enum
     DEVICE_TYPE_OTHER
 } device_t;
 
+/* The values are bit flags: getFormatString() decodes a mask of them.
+ *
+ * CAMERA_FORMAT_YUV is packed YUYV (CAMERA_PIXEL_FORMAT_YUYV), two bytes per
+ * pixel. CAMERA_FORMAT_NV21 is the semi-planar 4:2:0 layout (Y plane followed
+ * by interleaved VU), one and a half bytes per pixel. A camera that produces
+ * NV21 has to say NV21; reporting it as YUV makes every client read it as
+ * YUYV. */
 typedef enum
 {
     CAMERA_FORMAT_UNDEFINED = -1,
     CAMERA_FORMAT_YUV       = 1,
     CAMERA_FORMAT_H264ES    = 2,
     CAMERA_FORMAT_JPEG      = 4,
+    CAMERA_FORMAT_NV21      = 8,
 } camera_format_t;
 
 typedef enum
