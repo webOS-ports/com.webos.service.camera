@@ -176,6 +176,8 @@ typedef struct
 
 void getFormatString(int, char *);
 const char *getTypeString(device_t);
+std::string getFacingString(camera_facing_t);
+camera_facing_t convertFacingToCode(const std::string &);
 int getRandomNumber();
 std::string getErrorString(DEVICE_RETURN_CODE_T);
 void convertFormatToCode(std::string, camera_format_t *);

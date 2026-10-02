@@ -482,6 +482,10 @@ std::string GetInfoMethod::createInfoObjectJsonString(bool supported) const
                     jstring_create(getTypeString(rGetCameraInfo().n_devicetype)));
         jobject_put(json_info_obj, J_CSTR_TO_JVAL(CONST_PARAM_NAME_BUILTIN),
                     jboolean_create(rGetCameraInfo().b_builtin));
+        const std::string facing = getFacingString(rGetCameraInfo().n_facing);
+        if (!facing.empty())
+            jobject_put(json_info_obj, J_CSTR_TO_JVAL(CONST_PARAM_NAME_FACING),
+                        jstring_create(facing.c_str()));
         jobject_put(json_info_obj, J_CSTR_TO_JVAL(CONST_PARAM_NAME_SUPPORTED),
                     jboolean_create(supported));
 

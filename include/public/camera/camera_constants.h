@@ -44,6 +44,7 @@
 #define CONST_PARAM_NAME_BIRGHTNESS "brightness"
 #define CONST_PARAM_NAME_BITRATE "bitrate"
 #define CONST_PARAM_NAME_BUILTIN "builtin"
+#define CONST_PARAM_NAME_FACING "facing"
 #define CONST_PARAM_NAME_SUPPORTED "supported"
 #define CONST_PARAM_NAME_DETAILS "details"
 #define CONST_PARAM_NAME_CONTRAST "contrast"
@@ -142,6 +143,8 @@ const std::string cstr_yuvformat       = "YUV";
 const std::string cstr_nv21format      = "NV21";
 const std::string cstr_h264esformat    = "H264ES";
 const std::string cstr_jpegformat      = "JPEG";
+const std::string cstr_facingfront     = "front";
+const std::string cstr_facingback      = "back";
 const std::string cstr_primary         = "primary";
 const std::string cstr_secondary       = "secondary";
 const std::string cstr_format          = "format";

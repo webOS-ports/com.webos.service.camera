@@ -202,6 +202,30 @@ const char *getTypeString(device_t etype)
     }
 }
 
+// The name getInfo() reports for a facing. A camera whose facing is not known
+// reports none at all, which is the empty string.
+std::string getFacingString(camera_facing_t facing)
+{
+    switch (facing)
+    {
+    case CAMERA_FACING_FRONT:
+        return cstr_facingfront;
+    case CAMERA_FACING_BACK:
+        return cstr_facingback;
+    default:
+        return cstr_empty;
+    }
+}
+
+camera_facing_t convertFacingToCode(const std::string &facing)
+{
+    if (facing == cstr_facingfront)
+        return CAMERA_FACING_FRONT;
+    if (facing == cstr_facingback)
+        return CAMERA_FACING_BACK;
+    return CAMERA_FACING_UNKNOWN;
+}
+
 std::string getErrorString(DEVICE_RETURN_CODE_T error_code)
 {
     std::string retstring;

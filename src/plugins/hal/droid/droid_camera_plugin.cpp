@@ -590,6 +590,9 @@ int DroidCameraPlugin::getInfo(void *cam_info, std::string devicenode)
     info->str_productid  = std::to_string(dev);
     info->n_devicetype   = DEVICE_TYPE_CAMERA;
     info->b_builtin      = 1;
+    /* Android numbers the back camera 0 and the front camera 1, which is also
+     * what the names above say. */
+    info->n_facing = (dev == 0) ? CAMERA_FACING_BACK : CAMERA_FACING_FRONT;
     info->stResolution.clear();
     /* droidcamsrc hands out NV21; advertising it as YUV (packed YUYV) made
      * every client misread the frames. */

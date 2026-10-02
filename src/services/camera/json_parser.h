@@ -317,6 +317,7 @@ public:
         ro_info_.str_vendorid   = r_ininfo.str_vendorid;
         ro_info_.str_productid  = r_ininfo.str_productid;
         ro_info_.b_builtin      = r_ininfo.b_builtin;
+        ro_info_.n_facing       = r_ininfo.n_facing;
         ro_info_.n_devicetype   = r_ininfo.n_devicetype;
 
         // update resolution structure

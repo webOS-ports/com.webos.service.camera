@@ -135,6 +135,15 @@ struct camera_resolution_t
     }
 };
 
+/* Which way a camera faces. UNKNOWN is the default, and the right answer for a
+ * camera that is not fixed to a device (a USB webcam). */
+typedef enum
+{
+    CAMERA_FACING_UNKNOWN = 0,
+    CAMERA_FACING_FRONT,
+    CAMERA_FACING_BACK,
+} camera_facing_t;
+
 struct camera_device_info_t
 {
     std::string str_devicename;
@@ -142,6 +151,7 @@ struct camera_device_info_t
     std::string str_productid;
     device_t n_devicetype{DEVICE_TYPE_UNDEFINED};
     int b_builtin{0};
+    camera_facing_t n_facing{CAMERA_FACING_UNKNOWN};
     std::vector<camera_resolution_t> stResolution;
 };
 

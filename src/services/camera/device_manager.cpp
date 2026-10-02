@@ -302,6 +302,7 @@ DEVICE_RETURN_CODE_T DeviceManager::getInfo(int deviceid, camera_device_info_t *
 
         deviceMap_[deviceid].deviceInfoDB.n_devicetype = p_info->n_devicetype;
         deviceMap_[deviceid].deviceInfoDB.b_builtin    = p_info->b_builtin;
+        deviceMap_[deviceid].deviceInfoDB.n_facing     = p_info->n_facing;
         PLOGI("save DB, deviceid:%d\n", deviceid);
         // save DB data E
         p_info->str_devicename = deviceMap_[deviceid].stList.strProductName;
@@ -324,6 +325,7 @@ DEVICE_RETURN_CODE_T DeviceManager::getInfo(int deviceid, camera_device_info_t *
 
         p_info->n_devicetype = deviceMap_[deviceid].deviceInfoDB.n_devicetype;
         p_info->b_builtin    = deviceMap_[deviceid].deviceInfoDB.b_builtin;
+        p_info->n_facing     = deviceMap_[deviceid].deviceInfoDB.n_facing;
         // Load DB data E
 
         p_info->str_devicename = deviceMap_[deviceid].stList.strProductName;

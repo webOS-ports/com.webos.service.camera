@@ -337,6 +337,8 @@ DEVICE_RETURN_CODE_T CameraHalProxy::getDeviceInfo(std::string strdevicenode,
         pinfo->n_devicetype =
             get_optional<device_t>(j, CONST_PARAM_NAME_DEVICE_TYPE).value_or(DEVICE_TYPE_UNDEFINED);
         pinfo->b_builtin = get_optional<int>(j, CONST_PARAM_NAME_BUILTIN).value_or(0);
+        pinfo->n_facing  = convertFacingToCode(
+            get_optional<std::string>(j, CONST_PARAM_NAME_FACING).value_or(""));
 
         auto r = j[CONST_PARAM_NAME_RESOLUTION];
         if (r.is_object())
