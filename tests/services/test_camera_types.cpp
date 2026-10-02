@@ -110,3 +110,46 @@ TEST(CameraTypesFormat, MaskDecodesEveryFormat)
     for (const char *name : {"YUV|", "NV21|", "H264ES|", "JPEG|"})
         EXPECT_NE(nullptr, strstr(names, name)) << name;
 }
+
+// The facing a camera reports in getInfo(). A camera that does not know which
+// way it faces reports nothing, and a client that does not recognise what it
+// reads is left with UNKNOWN too, so the two ends can be updated separately.
+TEST(CameraTypesFacing, NamesOfEveryFacing)
+{
+    EXPECT_EQ("front", getFacingString(CAMERA_FACING_FRONT));
+    EXPECT_EQ("back", getFacingString(CAMERA_FACING_BACK));
+}
+
+TEST(CameraTypesFacing, UnknownFacingReportsNothing)
+{
+    EXPECT_TRUE(getFacingString(CAMERA_FACING_UNKNOWN).empty());
+}
+
+TEST(CameraTypesFacing, ParsingEveryName)
+{
+    EXPECT_EQ(CAMERA_FACING_FRONT, convertFacingToCode("front"));
+    EXPECT_EQ(CAMERA_FACING_BACK, convertFacingToCode("back"));
+}
+
+TEST(CameraTypesFacing, UnrecognisedNamesAreUnknown)
+{
+    EXPECT_EQ(CAMERA_FACING_UNKNOWN, convertFacingToCode(""));
+    EXPECT_EQ(CAMERA_FACING_UNKNOWN, convertFacingToCode("rear"));
+    EXPECT_EQ(CAMERA_FACING_UNKNOWN, convertFacingToCode("external"));
+    // Matching is exact, like the format names.
+    EXPECT_EQ(CAMERA_FACING_UNKNOWN, convertFacingToCode("Front"));
+}
+
+TEST(CameraTypesFacing, NameRoundTrips)
+{
+    for (camera_facing_t facing : {CAMERA_FACING_FRONT, CAMERA_FACING_BACK})
+        EXPECT_EQ(facing, convertFacingToCode(getFacingString(facing)));
+    EXPECT_EQ(CAMERA_FACING_UNKNOWN, convertFacingToCode(getFacingString(CAMERA_FACING_UNKNOWN)));
+}
+
+// A device info that nobody filled in must not claim to face anywhere.
+TEST(CameraTypesFacing, DeviceInfoDefaultsToUnknown)
+{
+    camera_device_info_t info;
+    EXPECT_EQ(CAMERA_FACING_UNKNOWN, info.n_facing);
+}
