@@ -65,12 +65,20 @@ typedef enum
     DEVICE_TYPE_OTHER
 } device_t;
 
+/* The values are bit flags: getFormatString() decodes a mask of them.
+ *
+ * CAMERA_FORMAT_YUV is packed YUYV (CAMERA_PIXEL_FORMAT_YUYV), two bytes per
+ * pixel. CAMERA_FORMAT_NV21 is the semi-planar 4:2:0 layout (Y plane followed
+ * by interleaved VU), one and a half bytes per pixel. A camera that produces
+ * NV21 has to say NV21; reporting it as YUV makes every client read it as
+ * YUYV. */
 typedef enum
 {
     CAMERA_FORMAT_UNDEFINED = -1,
     CAMERA_FORMAT_YUV       = 1,
     CAMERA_FORMAT_H264ES    = 2,
     CAMERA_FORMAT_JPEG      = 4,
+    CAMERA_FORMAT_NV21      = 8,
 } camera_format_t;
 
 typedef enum
@@ -127,6 +135,15 @@ struct camera_resolution_t
     }
 };
 
+/* Which way a camera faces. UNKNOWN is the default, and the right answer for a
+ * camera that is not fixed to a device (a USB webcam). */
+typedef enum
+{
+    CAMERA_FACING_UNKNOWN = 0,
+    CAMERA_FACING_FRONT,
+    CAMERA_FACING_BACK,
+} camera_facing_t;
+
 struct camera_device_info_t
 {
     std::string str_devicename;
@@ -134,6 +151,7 @@ struct camera_device_info_t
     std::string str_productid;
     device_t n_devicetype{DEVICE_TYPE_UNDEFINED};
     int b_builtin{0};
+    camera_facing_t n_facing{CAMERA_FACING_UNKNOWN};
     std::vector<camera_resolution_t> stResolution;
 };
 

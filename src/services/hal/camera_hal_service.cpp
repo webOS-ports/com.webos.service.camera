@@ -696,7 +696,7 @@ bool CameraHalService::setFormat(LSMessage &message)
     if (parsed.hasKey(CONST_PARAM_NAME_FORMAT))
     {
         int eFormat = parsed[CONST_PARAM_NAME_FORMAT].asNumber<int>();
-        if (eFormat >= CAMERA_FORMAT_UNDEFINED && eFormat <= CAMERA_FORMAT_JPEG)
+        if (eFormat >= CAMERA_FORMAT_UNDEFINED && eFormat <= CAMERA_FORMAT_NV21)
         {
             sformat.eFormat = (camera_format_t)eFormat;
         }
@@ -987,6 +987,10 @@ bool CameraHalService::getDeviceInfo(LSMessage &message)
                     jnumber_create_i32(static_cast<int32_t>(cameraInfo.n_devicetype)));
         jobject_put(json_outobj, J_CSTR_TO_JVAL(CONST_PARAM_NAME_BUILTIN),
                     jnumber_create_i32(cameraInfo.b_builtin));
+        const std::string facing = getFacingString(cameraInfo.n_facing);
+        if (!facing.empty())
+            jobject_put(json_outobj, J_CSTR_TO_JVAL(CONST_PARAM_NAME_FACING),
+                        jstring_create(facing.c_str()));
 
         jvalue_ref json_resolutionobj                   = jobject_create();
         std::vector<camera_resolution_t> resolutionInfo = cameraInfo.stResolution;

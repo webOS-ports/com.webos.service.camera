@@ -17,6 +17,7 @@
 if(WEBOS_USES_GOOGLE_TEST)
     add_subdirectory(plugins/hal)
     add_subdirectory(libs)
+    add_subdirectory(services)
 endif()
 
 add_subdirectory(test-app)
