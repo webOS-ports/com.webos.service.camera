@@ -168,9 +168,7 @@ bool LunaClient::callSync(const char *uri, const char *param, std::string *resul
             const auto *payload = LSMessageGetPayload(m);
             if (payload)
                 pCtx->pstrResult_->assign(payload);
-            // 3. Notify
-            pCtx->bDone_ = true;
-            // 4. getFd
+            // 3. getFd
             if (pCtx->pFd_)
             {
                 int fd = LSPayloadGetFd(LSMessageAccessPayload(m));
@@ -185,7 +183,11 @@ bool LunaClient::callSync(const char *uri, const char *param, std::string *resul
                 }
             }
             PLOGD("[%p] reply\n", g_thread_self());
-            return pCtx->bRet_.load();
+            // 4. Notify, last: callSync() may return and take the context with
+            // it from here on.
+            const bool bRet = pCtx->bRet_.load();
+            pCtx->bDone_    = true;
+            return bRet;
         },
         &ctx, &tok, &error);
 
@@ -196,23 +198,19 @@ bool LunaClient::callSync(const char *uri, const char *param, std::string *resul
 
     if (ret == true)
     {
-        ret = LSCallSetTimeout(pHandle_, tok, timeout, nullptr);
-        if (ret != true)
-        {
-            // The call is still pending but will never be waited on below.
-            // Cancel it so the reply callback cannot touch the stack context
-            // after this function returns.
-            PLOGE("[%p] LunaClient ERROR: LSCallSetTimeout failed", g_thread_self());
-            AutoLSError cancelError = {};
-            LSCallCancel(pHandle_, tok, &cancelError);
-        }
-    }
-
-    if (ret == true)
-    {
         if (pContext_ == g_main_context_default())
         {
-            while (!ctx.bDone_)
+            ret = LSCallSetTimeout(pHandle_, tok, timeout, nullptr);
+            if (ret != true)
+            {
+                // The call is still pending but will never be waited on below.
+                // Cancel it so the reply callback cannot touch the stack context
+                // after this function returns.
+                PLOGE("[%p] LunaClient ERROR: LSCallSetTimeout failed", g_thread_self());
+                AutoLSError cancelError = {};
+                LSCallCancel(pHandle_, tok, &cancelError);
+            }
+            while (ret == true && !ctx.bDone_)
             {
                 // Block until a source is dispatched; LSCallSetTimeout above
                 // guarantees the reply callback fires eventually.
@@ -221,6 +219,14 @@ bool LunaClient::callSync(const char *uri, const char *param, std::string *resul
         }
         else
         {
+            // No LSCallSetTimeout() here: the reply is dispatched on another
+            // thread, and that call must not race it. libluna takes the call
+            // map lock and then the call lock there, but the call lock and then
+            // the map lock when it handles a single reply, so the two can
+            // deadlock (a hung luneos-faced). When the reply wins outright the
+            // call is gone and LSCallSetTimeout() fails, which read as a failed
+            // close() and left camera2 holding the camera. The loop below is
+            // timeout enough.
             int cnt = 0;
             while (!ctx.bDone_ && cnt < timeout)
             {
